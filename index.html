@@ -1,0 +1,76 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>BusyNes</title>
+<meta name="theme-color" content="#1f5a43">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="icon" href="icons/icon.svg" type="image/svg+xml">
+<link rel="apple-touch-icon" href="icons/icon-192.png">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="BusyNes">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,600;12..96,800&family=Figtree:wght@400;500;600;700&display=swap">
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+
+<!-- Shown when config.js still has the placeholder values -->
+<section class="auth" id="setupScreen" hidden>
+  <div class="brand">Busy<span>Nes</span></div>
+  <h2>Almost there</h2>
+  <p>This copy of BusyNes isn't connected to a database yet. Open <b>config.js</b> and paste in your Supabase project URL and anon key. The README explains each step.</p>
+</section>
+
+<!-- Sign in -->
+<section class="auth" id="authScreen" hidden>
+  <div class="brand">Busy<span>Nes</span></div>
+  <p class="muted">Sign in with the email your partners added to BusyNes.</p>
+  <form id="authForm">
+    <div class="field"><label for="authEmail">Email</label><input id="authEmail" class="text" type="email" autocomplete="email" required></div>
+    <div class="field"><label for="authPass">Password</label><input id="authPass" class="text" type="password" autocomplete="current-password" minlength="6" required></div>
+    <div class="err" id="authErr" role="alert"></div>
+    <button class="btn" type="submit" id="signInBtn">Sign in</button>
+    <button class="btn ghost" type="button" id="signUpBtn">First time? Create my login</button>
+  </form>
+</section>
+
+<!-- Signed in, but the email isn't one of the partners -->
+<section class="auth" id="notPartnerScreen" hidden>
+  <div class="brand">Busy<span>Nes</span></div>
+  <h2>This email isn't on the partner list</h2>
+  <p>You're signed in as <b id="npEmail"></b>, but BusyNes only knows the three partners' emails. Ask whoever set up the database to add this email to the partners table, or sign in with a different email.</p>
+  <button class="btn ghost" type="button" id="npSignOut">Sign out</button>
+</section>
+
+<div id="appScreen" hidden>
+  <div class="app">
+    <header class="top">
+      <div class="brand">Busy<span>Nes</span></div>
+      <button class="iconbtn" id="refreshBtn" type="button" aria-label="Refresh"><svg viewBox="0 0 24 24"><path d="M20 11a8 8 0 1 0-2.3 5.7"/><path d="M20 4v7h-7"/></svg></button>
+      <button class="me" id="meBtn" type="button"><span class="dot"></span><span id="meName"></span></button>
+    </header>
+    <main id="view"></main>
+  </div>
+  <div class="cartbar" id="cartbar" hidden>
+    <div class="inner">
+      <div class="sum"><b class="num" id="cartTotal">R0</b><small id="cartWhat"></small></div>
+      <button class="btn ghost small" id="cartClear" type="button" style="color:inherit;border-color:rgba(127,127,127,.5)">Clear</button>
+      <button class="btn amber" id="cartNext" type="button">Record sale</button>
+    </div>
+  </div>
+  <nav class="tabs" aria-label="Sections"><div class="inner" role="tablist">
+    <button role="tab" data-tab="sell" id="tab-sell"><svg viewBox="0 0 24 24"><path d="M6 7h12l-1 13H7L6 7Z"/><path d="M9 7a3 3 0 0 1 6 0"/></svg>Sell</button>
+    <button role="tab" data-tab="stock" id="tab-stock"><svg viewBox="0 0 24 24"><rect x="4" y="3" width="16" height="18" rx="2"/><path d="M4 9h16M4 15h16"/></svg>Stock</button>
+    <button role="tab" data-tab="sales" id="tab-sales"><svg viewBox="0 0 24 24"><path d="M8 6h12M8 12h12M8 18h12"/><circle cx="4" cy="6" r="1"/><circle cx="4" cy="12" r="1"/><circle cx="4" cy="18" r="1"/></svg>Sales</button>
+    <button role="tab" data-tab="report" id="tab-report"><svg viewBox="0 0 24 24"><path d="M4 20V10M10 20V4M16 20v-7M22 20H2"/></svg>My money</button>
+  </div></nav>
+</div>
+<div id="overlay"></div>
+
+<script src="vendor/supabase.js"></script>
+<script src="config.js"></script>
+<script src="app.js"></script>
+</body>
+</html>
