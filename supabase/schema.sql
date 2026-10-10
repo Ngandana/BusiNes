@@ -11,6 +11,18 @@
 --     the server but only returns the caller's own numbers and the payments
 --     that involve the caller.
 
+-- ---------------------------------------------------------------- schema
+-- Everything lives in its own "busynes" schema so this can share a Supabase project
+-- with another app without touching its tables, policies or functions.
+-- After running this, add "busynes" to Exposed schemas (Project Settings > API).
+create schema if not exists busynes;
+set search_path = busynes;
+-- Safety check: stop immediately if new objects would not land in busynes.
+do $$ begin
+  if current_schema() <> 'busynes' then raise exception 'search_path is not busynes; aborting'; end if;
+end $$;
+grant usage on schema busynes to authenticated;
+
 -- ---------------------------------------------------------------- tables
 create table if not exists partners (
   id    text primary key,                 -- 'sibabalo', 'vusi', 'dokotela'
@@ -74,20 +86,20 @@ create table if not exists settlements (
 -- ---------------------------------------------------------------- helpers
 -- The partner id of whoever is signed in, from the email on their login.
 create or replace function my_partner() returns text
-language sql stable security definer set search_path = public as $$
+language sql stable security definer set search_path = busynes as $$
   select id from partners where lower(email) = lower(coalesce(auth.jwt() ->> 'email', ''))
 $$;
 
 -- True when the signed-in partner may see the whole sale.
 create or replace function sees_whole_sale(p_sale bigint) returns boolean
-language sql stable security definer set search_path = public as $$
+language sql stable security definer set search_path = busynes as $$
   select exists (select 1 from sales s where s.id = p_sale
                  and (s.paid_to = my_partner() or s.recorded_by = my_partner()))
 $$;
 
 -- True when the sale contains at least one product the signed-in partner owns.
 create or replace function sale_has_my_items(p_sale bigint) returns boolean
-language sql stable security definer set search_path = public as $$
+language sql stable security definer set search_path = busynes as $$
   select exists (select 1 from sale_items si
                  join owner_shares os on os.owner = si.owner
                  where si.sale_id = p_sale and os.partner_id = my_partner())
@@ -118,6 +130,9 @@ create policy products_update on products for update to authenticated using (my_
 -- otherwise anyone could move another partner's drinks (and their money) to themselves.
 revoke update on products from authenticated, anon;
 grant update (name, price, sort, hidden) on products to authenticated;
+grant select on partners, owner_shares, products, stock_moves, sales, sale_items, settlements to authenticated;
+grant insert on products, stock_moves, settlements to authenticated;
+grant usage on all sequences in schema busynes to authenticated;
 
 drop policy if exists moves_read on stock_moves;
 create policy moves_read on stock_moves for select to authenticated using (my_partner() is not null);
@@ -144,7 +159,7 @@ create policy settle_insert on settlements for insert to authenticated with chec
 -- p_items: [{"product_id": "heineken", "qty": 2}, ...]
 create or replace function record_sale(p_items jsonb, p_paid_to text, p_method text, p_note text default '')
 returns bigint
-language plpgsql security definer set search_path = public as $$
+language plpgsql security definer set search_path = busynes as $$
 declare
   me text := my_partner();
   new_id bigint;
@@ -170,7 +185,7 @@ end $$;
 
 -- Delete a sale (to fix a mistake). Only whoever recorded it or received the money.
 create or replace function delete_sale(p_id bigint) returns void
-language plpgsql security definer set search_path = public as $$
+language plpgsql security definer set search_path = busynes as $$
 begin
   delete from sales where id = p_id
     and (recorded_by = my_partner() or paid_to = my_partner());
@@ -179,7 +194,7 @@ end $$;
 
 -- Stock on hand for every product: last fridge count + later deliveries - later sales.
 create or replace function stock_levels() returns table (product_id text, qty int)
-language sql stable security definer set search_path = public as $$
+language sql stable security definer set search_path = busynes as $$
   with last_count as (
     select distinct on (m.product_id) m.product_id, m.qty, m.at
     from stock_moves m where m.kind = 'count'
@@ -200,7 +215,7 @@ $$;
 -- The signed-in partner's own money for a period (p_from = null means all time).
 -- Returns only their numbers, plus the settle-up payments they are part of.
 create or replace function my_money(p_from timestamptz default null) returns jsonb
-language plpgsql stable security definer set search_path = public as $$
+language plpgsql stable security definer set search_path = busynes as $$
 declare
   me text := my_partner();
   ids text[]; nets numeric[];

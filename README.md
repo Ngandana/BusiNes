@@ -31,9 +31,10 @@ Privacy is enforced by the database, not just hidden on screen, so it holds even
 1. Create a free account at https://supabase.com and click **New project**. Pick a region close to South Africa.
 2. In the project, open **SQL Editor > New query**, paste all of `supabase/schema.sql`, and click **Run**.
 3. Open `supabase/seed.sql` in VS Code and replace the three `@example.com` emails with the real emails each partner will sign in with. Paste it into a new query and click **Run**.
-4. Go to **Project Settings > API**. Copy the **Project URL** and the **anon public** key into `config.js`. Never put the **service_role** key there: it skips all the privacy rules, and `config.js` is public.
-5. Keep **Confirm email** turned on (Authentication > Sign In / Providers > Email). Without it, anyone who knows a partner's email could create that partner's login before they do.
-6. Once all three partners have created their logins, turn off **Allow new users to sign up** in the same settings. Nobody else needs an account.
+4. Go to **Project Settings > API** (or **Integrations > Data API**) and add `busynes` to **Exposed schemas**. BusyNes keeps all its tables in its own `busynes` schema, so it can share a project with another app.
+5. On the same page, copy the **Project URL** and the **anon public** key into `config.js`. Never put the **service_role** key there: it skips all the privacy rules, and `config.js` is public.
+6. Keep **Confirm email** turned on (Authentication > Sign In / Providers > Email). Without it, anyone who knows a partner's email could create that partner's login before they do.
+7. Once all three partners have created their logins, turn off **Allow new users to sign up** in the same settings. Nobody else needs an account.
 
 ## 3. Run it on your computer
 

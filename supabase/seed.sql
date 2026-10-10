@@ -2,6 +2,8 @@
 -- 1. Replace the three email addresses below with the ones each partner will sign in with.
 -- 2. Run the whole file in Supabase: SQL Editor > New query > paste > Run.
 
+set search_path = busynes;
+
 insert into partners (id, name, email) values
   ('sibabalo', 'Sibabalo', 'sibabalo@example.com'),
   ('vusi',     'Vusi',     'vusi@example.com'),

@@ -437,7 +437,7 @@ $("#npSignOut").onclick = () => S.sb.auth.signOut();
   if (!cfg.SUPABASE_URL || /YOUR-PROJECT/.test(cfg.SUPABASE_URL) || !cfg.SUPABASE_ANON_KEY || /YOUR-ANON-KEY/.test(cfg.SUPABASE_ANON_KEY)){
     show("setupScreen"); return;
   }
-  S.sb = window.supabase.createClient(cfg.SUPABASE_URL, cfg.SUPABASE_ANON_KEY);
+  S.sb = window.supabase.createClient(cfg.SUPABASE_URL, cfg.SUPABASE_ANON_KEY, {db:{schema:"busynes"}});
   let lastUser;
   S.sb.auth.onAuthStateChange((_event, session) => {
     const id = session && session.user && session.user.id;
