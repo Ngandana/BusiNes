@@ -5,9 +5,9 @@
 set search_path = busynes;
 
 insert into partners (id, name, email) values
-  ('sibabalo', 'Sibabalo', 'sibabalo@example.com'),
-  ('vusi',     'Vusi',     'vusi@example.com'),
-  ('dokotela', 'Dokotela', 'dokotela@example.com')
+  ('sibabalo', 'Sibabalo', 'sibabalwengandana@gmail.com'),
+  ('vusi',     'Vusi',     'vusuthandodube2@gmail.com'),
+  ('dokotela', 'Dokotela', '251537552@mycput.ac.za')
 on conflict (id) do update set name = excluded.name, email = excluded.email;
 
 -- Sibabalo owns his products outright. Vusi and Dokotela share the beers 50/50.
@@ -18,7 +18,7 @@ insert into owner_shares (owner, partner_id, share) values
 on conflict (owner, partner_id) do update set share = excluded.share;
 
 insert into products (id, name, price, owner, sort) values
-  ('first-watch',         'First Watch Whisky',     250, 'sibabalo', 1),
+  ('first-watch',         'First Watch Whisky',     280, 'sibabalo', 1),
   ('gordons',             'Gordon''s Gin',          280, 'sibabalo', 2),
   ('russian-bear',        'Russian Bear Vodka',     270, 'sibabalo', 3),
   ('robertson-sweet-red', 'Robertson''s Sweet Red',  75, 'sibabalo', 4),

@@ -1,0 +1,7 @@
+/manifest.webmanifest
+  Content-Type: application/manifest+json
+/sw.js
+  Cache-Control: no-cache
+/*
+  X-Content-Type-Options: nosniff
+  Referrer-Policy: same-origin

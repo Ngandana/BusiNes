@@ -5,6 +5,7 @@
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <title>BusyNes</title>
 <meta name="theme-color" content="#1f5a43">
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; img-src 'self' data:; connect-src 'self' https://*.supabase.co wss://*.supabase.co; manifest-src 'self'; base-uri 'self'; form-action 'self'">
 <link rel="manifest" href="manifest.webmanifest">
 <link rel="icon" href="icons/icon.svg" type="image/svg+xml">
 <link rel="apple-touch-icon" href="icons/icon-192.png">
@@ -33,6 +34,7 @@
     <div class="err" id="authErr" role="alert"></div>
     <button class="btn" type="submit" id="signInBtn">Sign in</button>
     <button class="btn ghost" type="button" id="signUpBtn">First time? Create my login</button>
+    <button class="linkbtn" type="button" id="forgotBtn">Forgot my password</button>
   </form>
 </section>
 
@@ -49,6 +51,8 @@
     <header class="top">
       <div class="brand">Busy<span>Nes</span></div>
       <button class="iconbtn" id="refreshBtn" type="button" aria-label="Refresh"><svg viewBox="0 0 24 24"><path d="M20 11a8 8 0 1 0-2.3 5.7"/><path d="M20 4v7h-7"/></svg></button>
+      <button class="iconbtn bell" id="bellBtn" type="button" aria-label="Alerts"><svg viewBox="0 0 24 24"><path d="M6 9a6 6 0 0 1 12 0c0 6 2 7 2 7H4s2-1 2-7Z"/><path d="M10 20a2 2 0 0 0 4 0"/></svg><span class="bell-badge" id="bellBadge" hidden></span></button>
+      <button class="iconbtn" id="teamBtn" type="button" aria-label="Team: call and chat"><svg viewBox="0 0 24 24"><path d="M5 4h4l2 5-2.5 1.5a11 11 0 0 0 5 5L15 13l5 2v4a1 1 0 0 1-1 1A16 16 0 0 1 4 5a1 1 0 0 1 1-1Z"/></svg></button>
       <button class="me" id="meBtn" type="button"><span class="dot"></span><span id="meName"></span></button>
     </header>
     <main id="view"></main>
@@ -62,9 +66,11 @@
   </div>
   <nav class="tabs" aria-label="Sections"><div class="inner" role="tablist">
     <button role="tab" data-tab="sell" id="tab-sell"><svg viewBox="0 0 24 24"><path d="M6 7h12l-1 13H7L6 7Z"/><path d="M9 7a3 3 0 0 1 6 0"/></svg>Sell</button>
+    <button role="tab" data-tab="orders" id="tab-orders"><svg viewBox="0 0 24 24"><rect x="5" y="4" width="14" height="17" rx="2"/><path d="M9 4h6v3H9zM9 12h6M9 16h4"/></svg>Orders<span class="tabbadge" id="badge-orders" hidden></span></button>
+    <button role="tab" data-tab="owed" id="tab-owed"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="8"/><path d="M12 7v5l3 2"/></svg>Owed<span class="tabbadge" id="badge-owed" hidden></span></button>
     <button role="tab" data-tab="stock" id="tab-stock"><svg viewBox="0 0 24 24"><rect x="4" y="3" width="16" height="18" rx="2"/><path d="M4 9h16M4 15h16"/></svg>Stock</button>
     <button role="tab" data-tab="sales" id="tab-sales"><svg viewBox="0 0 24 24"><path d="M8 6h12M8 12h12M8 18h12"/><circle cx="4" cy="6" r="1"/><circle cx="4" cy="12" r="1"/><circle cx="4" cy="18" r="1"/></svg>Sales</button>
-    <button role="tab" data-tab="report" id="tab-report"><svg viewBox="0 0 24 24"><path d="M4 20V10M10 20V4M16 20v-7M22 20H2"/></svg>My money</button>
+    <button role="tab" data-tab="report" id="tab-report"><svg viewBox="0 0 24 24"><path d="M4 20V10M10 20V4M16 20v-7M22 20H2"/></svg>Money</button>
   </div></nav>
 </div>
 <div id="overlay"></div>

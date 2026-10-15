@@ -74,8 +74,8 @@ h2{font-family:var(--display);font-weight:800;font-size:19px;margin:0;letter-spa
 
 /* Tabs */
 nav.tabs{position:fixed;left:0;right:0;bottom:0;z-index:7;background:var(--surface);border-top:1px solid var(--line);padding-bottom:env(safe-area-inset-bottom,0px)}
-nav.tabs .inner{max-width:560px;margin:0 auto;display:grid;grid-template-columns:repeat(4,1fr)}
-nav.tabs button{background:none;border:0;height:64px;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:3px;font-size:12px;font-weight:600;color:var(--muted)}
+nav.tabs .inner{max-width:560px;margin:0 auto;display:grid;grid-template-columns:repeat(6,1fr)}
+nav.tabs button{position:relative;background:none;border:0;height:64px;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:3px;font-size:11px;font-weight:600;color:var(--muted)}
 nav.tabs button svg{width:22px;height:22px;stroke:currentColor;fill:none;stroke-width:1.8;stroke-linecap:round;stroke-linejoin:round}
 nav.tabs button[aria-selected="true"]{color:var(--bottle)}
 
@@ -158,3 +158,27 @@ img{max-width:100%}
 .iconbtn svg{width:18px;height:18px;stroke:currentColor;fill:none;stroke-width:2;stroke-linecap:round;stroke-linejoin:round}
 .statement{font-size:16px;line-height:1.45}
 .statement b{font-family:var(--display)}
+
+/* Alerts, orders, owed, team */
+a.btn{text-decoration:none;display:inline-block;text-align:center}
+.iconbtn.bell{position:relative}
+.bell-badge,.tabbadge{position:absolute;min-width:17px;height:17px;border-radius:9px;background:var(--bad);color:#fff;font-size:10px;font-weight:800;display:grid;place-items:center;padding:0 4px;line-height:1}
+.bell-badge{top:-5px;right:-5px}
+.tabbadge{top:7px;left:calc(50% + 6px)}
+.pill.bad{background:var(--bad-soft);color:var(--bad)}
+.pill.warn{background:var(--amber-soft);color:var(--ink)}
+.debt{padding:12px 0;border-bottom:1px solid var(--line)}
+.debt:last-child{border-bottom:0}
+.debt .title{font-weight:700}
+.debt .sub{font-size:13px;color:var(--muted)}
+.notif{display:flex;gap:12px;align-items:flex-start;text-align:left;width:100%;background:none;border:0;border-bottom:1px solid var(--line);padding:12px 4px}
+.notif.unread{background:var(--amber-soft);border-radius:10px}
+.notif .ico{font-size:20px;line-height:1.2}
+.notif .main{flex:1;min-width:0;display:flex;flex-direction:column;gap:2px}
+.notif .sub{font-size:13px;color:var(--muted)}
+.notif .tm{font-size:12px;text-align:right;white-space:nowrap}
+.chat{display:flex;flex-direction:column;gap:10px;max-height:340px;overflow:auto}
+.msg{background:var(--sunk);border-radius:12px;padding:8px 12px;max-width:88%;align-self:flex-start}
+.msg.mine{align-self:flex-end;background:var(--amber-soft)}
+.msg .who{font-size:12px}
+#chatInput{flex:1}
