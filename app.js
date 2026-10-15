@@ -372,6 +372,8 @@ function viewOrders(){
     `<div class="item"><div class="main"><div class="title">${esc(o.customer || "No name")} <span class="pill">${o.status === "done" ? "sold" : "cancelled"}</span></div><div class="sub">${line(o)}</div></div></div>`).join("") + `</div></section>`;
   return h;
 }
+// Value for <input type="datetime-local">: local time, to the minute.
+const localInput = d => { const z = new Date(d.getTime() - d.getTimezoneOffset() * 60000); return z.toISOString().slice(0, 16); };
 function newOrderSheet(){
   const qty = {}, os = Object.values(owners());
   const prods = S.products.filter(p => !p.hidden);
@@ -380,6 +382,8 @@ function newOrderSheet(){
     <div class="field"><span class="lab">What do they want?</span><div class="list card" style="padding-block:0">${os.map(o => prods.filter(p => p.owner === o.id).map(p =>
       `<div class="item" style="padding:8px 0"><div class="main"><div class="title">${esc(p.name)}</div><div class="sub num">${money(p.price)}</div></div>
         <div class="stepper"><button type="button" class="btn small ghost" data-oq="${esc(p.id)}" data-d="-1" aria-label="One less ${esc(p.name)}">−</button><b class="num" id="oq-${esc(p.id)}" style="min-width:22px;text-align:center">0</b><button type="button" class="btn small" data-oq="${esc(p.id)}" data-d="1" aria-label="One more ${esc(p.name)}">+</button></div></div>`).join("")).join("")}</div></div>
+    <div class="field"><label for="ordAt">When did they ask?</label><input id="ordAt" class="text" type="datetime-local" value="${localInput(new Date())}" max="${localInput(new Date())}">
+      <span class="muted" style="font-size:13px">Leave it as it is for right now, or pick an earlier time if you forgot to write it down.</span></div>
     <div class="field"><label for="ordNote">Note (optional)</label><input id="ordNote" class="text" maxlength="120" placeholder="e.g. collect at 5pm, will pay Friday"></div>
     <div class="row"><button class="btn ghost" type="button" id="sheetCancel">Cancel</button><span class="spacer"></span><button class="btn" type="button" id="saveOrder">Save order</button></div>`);
   document.querySelectorAll("[data-oq]").forEach(b => b.onclick = () => {
@@ -387,12 +391,16 @@ function newOrderSheet(){
     $("#oq-" + CSS.escape(id)).textContent = qty[id];
   });
   $("#sheetCancel").onclick = closeSheet;
+  let touched = false;
+  $("#ordAt").oninput = () => { touched = true; };
   $("#saveOrder").onclick = e => once(e.target, async () => {
     const items = Object.entries(qty).filter(([,q]) => q > 0).map(([product_id, q]) => ({product_id, qty:q}));
     if (!items.length) return toast("Pick at least one drink.");
+    const when = $("#ordAt").value, at = touched && when ? new Date(when) : null;
+    if (at && (isNaN(at) || at.getTime() > Date.now() + 5 * 60000)) return toast("The date can't be in the future.");
     try {
-      await must(S.sb.rpc("create_order", {p_customer: $("#ordCust").value.trim(), p_items: items, p_note: $("#ordNote").value.trim()}));
-      closeSheet(); toast("Order saved. The others have been told."); await refresh();
+      await must(S.sb.rpc("create_order", {p_customer: $("#ordCust").value.trim(), p_items: items, p_note: $("#ordNote").value.trim(), p_at: at ? at.toISOString() : null}));
+      closeSheet(); toast(at ? "Order saved with its date." : "Order saved. The others have been told."); await refresh();
     } catch(err){ failed(err); }
   });
 }

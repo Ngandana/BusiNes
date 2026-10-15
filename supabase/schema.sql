@@ -434,7 +434,9 @@ language sql stable security definer set search_path = busynes as $$
 $$;
 
 -- Orders waiting to be sold.
-create or replace function create_order(p_customer text, p_items jsonb, p_note text default '') returns bigint
+-- p_at: when the order came in (null = now), so an order you forgot to write down can be added later.
+drop function if exists create_order(text, jsonb, text);
+create or replace function create_order(p_customer text, p_items jsonb, p_note text default '', p_at timestamptz default null) returns bigint
 language plpgsql security definer set search_path = busynes as $$
 declare
   me text := my_partner();
@@ -443,6 +445,7 @@ declare
 begin
   if me is null then raise exception 'Not a BusyNes partner'; end if;
   if jsonb_typeof(p_items) <> 'array' or jsonb_array_length(p_items) = 0 then raise exception 'An order needs at least one item'; end if;
+  if p_at is not null and p_at > now() + interval '5 minutes' then raise exception 'The order date can''t be in the future'; end if;
   for it in select * from jsonb_array_elements(p_items) loop
     select * into p from products where id = it ->> 'product_id';
     if not found then raise exception 'Unknown product %', it ->> 'product_id'; end if;
@@ -450,8 +453,8 @@ begin
     clean := clean || jsonb_build_object('product_id', p.id, 'name', p.name, 'qty', (it ->> 'qty')::int);
     lines := lines || case when lines = '' then '' else ', ' end || (it ->> 'qty') || ' × ' || p.name;
   end loop;
-  insert into orders (customer, items, note, created_by)
-    values (left(coalesce(p_customer, ''), 80), clean, left(coalesce(p_note, ''), 200), me)
+  insert into orders (at, customer, items, note, created_by)
+    values (coalesce(p_at, now()), left(coalesce(p_customer, ''), 80), clean, left(coalesce(p_note, ''), 200), me)
     returning id into new_id;
   select name into my_name from partners where id = me;
   perform notify_all('order', 'New order' || case when coalesce(p_customer, '') <> '' then ' from ' || left(p_customer, 40) else '' end,
@@ -659,7 +662,7 @@ grant execute on function sale_has_my_items(bigint) to authenticated;
 revoke all on function record_payment(bigint, numeric, text, text) from public, anon;
 revoke all on function set_sale_due(bigint, date) from public, anon;
 revoke all on function my_debts() from public, anon;
-revoke all on function create_order(text, jsonb, text) from public, anon;
+revoke all on function create_order(text, jsonb, text, timestamptz) from public, anon;
 revoke all on function cancel_order(bigint) from public, anon;
 revoke all on function send_message(text) from public, anon;
 revoke all on function mark_notifications_read(bigint) from public, anon;
@@ -674,7 +677,7 @@ revoke all on function send_due_reminders() from public, anon, authenticated;
 grant execute on function record_payment(bigint, numeric, text, text) to authenticated;
 grant execute on function set_sale_due(bigint, date) to authenticated;
 grant execute on function my_debts() to authenticated;
-grant execute on function create_order(text, jsonb, text) to authenticated;
+grant execute on function create_order(text, jsonb, text, timestamptz) to authenticated;
 grant execute on function cancel_order(bigint) to authenticated;
 grant execute on function send_message(text) to authenticated;
 grant execute on function mark_notifications_read(bigint) to authenticated;
