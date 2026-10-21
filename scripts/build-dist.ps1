@@ -4,7 +4,7 @@ $root = Split-Path -Parent $PSScriptRoot
 $dist = Join-Path $root "dist"
 if (Test-Path $dist) { Remove-Item $dist -Recurse -Force }
 New-Item -ItemType Directory $dist | Out-Null
-foreach ($f in "index.html","styles.css","app.js","config.js","sw.js","manifest.webmanifest","_headers") { Copy-Item (Join-Path $root $f) $dist }
+foreach ($f in "index.html","privacy.html","styles.css","app.js","config.js","sw.js","manifest.webmanifest","_headers") { Copy-Item (Join-Path $root $f) $dist }
 Copy-Item (Join-Path $root "icons") (Join-Path $dist "icons") -Recurse
 New-Item -ItemType Directory (Join-Path $dist "vendor") | Out-Null
 Copy-Item (Join-Path $root "vendor\supabase.js") (Join-Path $dist "vendor")

@@ -2,7 +2,7 @@
   "id": "./",
   "name": "BusyNes",
   "short_name": "BusyNes",
-  "description": "Record drink sales, track stock and see who holds whose money.",
+  "description": "Sales, stock, orders and who gets what, for your business and the people you work with.",
   "start_url": "./",
   "scope": "./",
   "display": "standalone",

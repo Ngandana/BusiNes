@@ -10,6 +10,7 @@
 <link rel="icon" href="icons/icon.svg" type="image/svg+xml">
 <link rel="apple-touch-icon" href="icons/icon-192.png">
 <meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-title" content="BusyNes">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,600;12..96,800&family=Figtree:wght@400;500;600;700&display=swap">
@@ -27,7 +28,7 @@
 <!-- Sign in -->
 <section class="auth" id="authScreen" hidden>
   <div class="brand">Busy<span>Nes</span></div>
-  <p class="muted">Sign in with the email your partners added to BusyNes.</p>
+  <p class="muted">Sales, stock, orders and who gets what, for your business and the people you work with. Sign in, or create a login to start your own business or join one you were invited to.</p>
   <form id="authForm">
     <div class="field"><label for="authEmail">Email</label><input id="authEmail" class="text" type="email" autocomplete="email" required></div>
     <div class="field"><label for="authPass">Password</label><input id="authPass" class="text" type="password" autocomplete="current-password" minlength="6" required></div>
@@ -36,20 +37,36 @@
     <button class="btn ghost" type="button" id="signUpBtn">First time? Create my login</button>
     <button class="linkbtn" type="button" id="forgotBtn">Forgot my password</button>
   </form>
+  <p class="muted" style="font-size:13px">Your business is private: only you and the people you invite can see it. <a href="privacy.html">How your information is kept private</a></p>
 </section>
 
-<!-- Signed in, but the email isn't one of the partners -->
-<section class="auth" id="notPartnerScreen" hidden>
+<!-- Signed in, but not part of any business yet -->
+<section class="auth" id="onboardScreen" hidden>
   <div class="brand">Busy<span>Nes</span></div>
-  <h2>This email isn't on the partner list</h2>
-  <p>You're signed in as <b id="npEmail"></b>, but BusyNes only knows the three partners' emails. Ask whoever set up the database to add this email to the partners table, or sign in with a different email.</p>
-  <button class="btn ghost" type="button" id="npSignOut">Sign out</button>
+  <h2>Let's set up your business</h2>
+  <p class="muted">Give it a name. Only you and the people you invite will ever see it.</p>
+  <form id="onboardForm">
+    <div class="field"><label for="obName">Your name</label><input id="obName" class="text" maxlength="40" autocomplete="given-name" placeholder="e.g. Thabo"></div>
+    <div class="field"><label for="obBiz">Business name</label><input id="obBiz" class="text" maxlength="60" placeholder="e.g. Fat Cook" required></div>
+    <div class="field"><label for="obKind">What do you sell? (optional)</label><input id="obKind" class="text" maxlength="40" placeholder="e.g. Fast food, drinks, airtime"></div>
+    <div class="err" id="obErr" role="alert"></div>
+    <button class="btn" type="submit" id="obBtn">Create my business</button>
+  </form>
+  <div class="card">
+    <b>Were you invited to a business?</b>
+    <p class="muted" style="margin:6px 0 10px">Ask the owner to invite <b id="obEmail"></b>, the email you signed in with. Once they have, tap the button below and it will appear.</p>
+    <button class="btn ghost" type="button" id="obCheck">Check for invitations</button>
+  </div>
+  <div class="row"><button class="linkbtn" type="button" id="obSignOut">Sign out</button><span class="spacer"></span><a class="linkbtn" href="privacy.html">Privacy</a></div>
 </section>
 
 <div id="appScreen" hidden>
   <div class="app">
     <header class="top">
-      <div class="brand">Busy<span>Nes</span></div>
+      <div class="brandwrap">
+        <div class="brand">Busy<span>Nes</span></div>
+        <button class="bizbtn" id="bizBtn" type="button" aria-label="Switch business or open settings"><span id="bizName"></span></button>
+      </div>
       <button class="iconbtn" id="refreshBtn" type="button" aria-label="Refresh"><svg viewBox="0 0 24 24"><path d="M20 11a8 8 0 1 0-2.3 5.7"/><path d="M20 4v7h-7"/></svg></button>
       <button class="iconbtn bell" id="bellBtn" type="button" aria-label="Alerts"><svg viewBox="0 0 24 24"><path d="M6 9a6 6 0 0 1 12 0c0 6 2 7 2 7H4s2-1 2-7Z"/><path d="M10 20a2 2 0 0 0 4 0"/></svg><span class="bell-badge" id="bellBadge" hidden></span></button>
       <button class="iconbtn" id="teamBtn" type="button" aria-label="Team: call and chat"><svg viewBox="0 0 24 24"><path d="M5 4h4l2 5-2.5 1.5a11 11 0 0 0 5 5L15 13l5 2v4a1 1 0 0 1-1 1A16 16 0 0 1 4 5a1 1 0 0 1 1-1Z"/></svg></button>

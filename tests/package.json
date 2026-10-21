@@ -1,0 +1,15 @@
+{
+  "name": "busynes-tests",
+  "private": true,
+  "type": "module",
+  "description": "Checks for the BusyNes database rules and app. Run: npm install, then npm test.",
+  "scripts": {
+    "test": "node run-all.mjs",
+    "test:db": "node migrate.mjs && node features.mjs",
+    "test:app": "node app.mjs"
+  },
+  "devDependencies": {
+    "@electric-sql/pglite": "^0.5.8",
+    "puppeteer-core": "^25.13.0"
+  }
+}

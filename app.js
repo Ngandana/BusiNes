@@ -1,19 +1,21 @@
-// BusyNes: record drink sales, track stock, and see your own side of the money.
-// Data lives in Supabase. Privacy is enforced by the database (see supabase/schema.sql),
-// so this file only ever receives what the signed-in partner is allowed to see.
+// BusyNes: sales, stock, orders and who gets what, for any small business.
+// Data lives in Supabase. Privacy is enforced by the database (see supabase/schema.sql):
+// a business is only visible to the people who belong to it, and each person only receives
+// what their role allows. This file only ever shows what it is given.
 (() => {
 "use strict";
 
-const VERSION = "2.0";
+const VERSION = "3.0";
 const LOW = 3;               // "running low" threshold
 const POLL_MS = 20000;       // refresh while the app is open
-const OWNER_COLORS = ["var(--beer)", "var(--sib)", "var(--bottle)", "var(--warn)"]; // given to owner groups in alphabetical order
+const OWNER_COLORS = ["var(--beer)", "var(--sib)", "var(--bottle)", "var(--warn)"]; // given to owner groups in order
 
 // ---------- state ----------
 const S = {
   sb: null, user: null, me: null,
+  biz: null, businesses: [], unreadBy: {}, members: null,
   partners: [], shares: [], products: [], stock: {}, moves: [], sales: [], settlements: [], money: null,
-  orders: [], debts: [], notifs: [], messages: [], seenNotif: null, fromOrder: null,
+  orders: [], debts: [], notifs: [], messages: [], seenNotif: null, fromOrder: null, salesFilter: "all", orderFees: {},
   tab: "sell", cart: {}, period: "settle", editing: null, confirmDel: null, loaded: false,
 };
 const store = {
@@ -22,11 +24,27 @@ const store = {
 };
 S.tab = store.get("busynes.tab") || "sell";
 
+// ---------- who am I in this business ----------
+const role = () => (S.biz && S.biz.role) || "";
+const bid = () => S.biz.id;
+const isOwner = () => role() === "owner";
+const canManage = () => role() === "owner" || role() === "partner";               // products, prices, settling up
+const canSell = () => ["owner","partner","staff"].includes(role());               // sales, orders, stock
+const isDelivery = () => role() === "delivery";                                    // sees and takes orders only
+const NAV = () => isDelivery() ? ["orders"] : ["sell","orders","owed","stock","sales","report"];
+const TABS = ["sell","orders","owed","stock","sales","report","team","settings"];
+const ROLE_NAME = {owner:"Owner", partner:"Partner", staff:"Staff", delivery:"Delivery"};
+const ROLE_HELP = {
+  partner: "Owns part of the business. Records sales, manages products and stock, and sees their own share.",
+  staff: "Records sales, orders and stock. Doesn't own anything or change prices.",
+  delivery: "Sees orders, takes them and delivers. Nothing else.",
+};
+
 // ---------- helpers ----------
 const $ = s => document.querySelector(s);
 const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
 const num = v => Number(v) || 0;
-const money = n => "R" + Math.round(num(n)).toLocaleString("en-ZA").replace(/ /g," ");
+const money = n => "R" + Math.round(num(n)).toLocaleString("en-ZA").replace(/ /g," ");
 const money2 = n => { const r = Math.round(num(n)*100)/100; return Number.isInteger(r) ? money(r) : "R" + r.toFixed(2); };
 const dayKey = d => { d = new Date(d); return d.getFullYear()+"-"+String(d.getMonth()+1).padStart(2,"0")+"-"+String(d.getDate()).padStart(2,"0"); };
 const dayLabel = iso => {
@@ -36,12 +54,15 @@ const dayLabel = iso => {
   return new Date(iso).toLocaleDateString("en-ZA",{weekday:"short", day:"numeric", month:"short"});
 };
 const timeLabel = iso => new Date(iso).toLocaleTimeString("en-ZA",{hour:"2-digit", minute:"2-digit"});
-const pname = id => id === S.me ? "you" : ((S.partners.find(p => p.id === id) || {}).name || id || "?");
+const pname = id => id === S.me ? "you" : ((S.partners.find(p => p.id === id) || {}).name || "someone");
 const Pname = id => { const n = pname(id); return n === "you" ? "You" : n; };
 const productById = id => S.products.find(p => p.id === id);
-const slug = s => s.toLowerCase().replace(/[^a-z0-9]+/g,"-").replace(/^-|-$/g,"").slice(0,40) || ("p" + Date.now());
+const slug = s => s.toLowerCase().replace(/[^a-z0-9]+/g,"-").replace(/^-|-$/g,"").slice(0,40) || ("g" + Date.now().toString(36));
+const niceGroup = id => String(id).replace(/[-_]+/g," ").replace(/\b\w/g, c => c.toUpperCase());
+const pct = f => (Math.round(num(f) * 10000) / 100) + "%";
+const appLink = () => location.origin + location.pathname.replace(/[^/]*$/, "");
 
-// Owner groups ("sibabalo", "beers") come from the owner_shares table.
+// Owner groups ("everyone", "beers") come from the ownership table. Each group is owned by one or more people.
 function owners(){
   const map = {};
   for (const sh of S.shares){
@@ -49,16 +70,17 @@ function owners(){
     o.partners.push(sh.partner_id);
   }
   Object.values(map).forEach((o,i) => {
-    o.name = o.partners.map(id => (S.partners.find(p => p.id === id) || {name:id}).name).join(" & ");
+    o.name = o.partners.map(id => (S.partners.find(p => p.id === id) || {name:"?"}).name).join(" & ");
     o.mine = o.partners.includes(S.me);
     o.color = OWNER_COLORS[i % OWNER_COLORS.length];
   });
-  for (const p of S.products) if (!map[p.owner]) map[p.owner] = {id:p.owner, partners:[], name:p.owner, mine:false, color:"var(--muted)"};
+  for (const p of S.products) if (!map[p.owner]) map[p.owner] = {id:p.owner, partners:[], name:niceGroup(p.owner), mine:false, color:"var(--muted)"};
   // Your own stock first, then the rest alphabetically, so the layout doesn't shuffle between refreshes.
   const sorted = {};
   Object.values(map).sort((a,b) => (b.mine - a.mine) || a.id.localeCompare(b.id)).forEach(o => sorted[o.id] = o);
   return sorted;
 }
+const groupIds = () => [...new Set(S.shares.map(s => s.owner))].sort();
 
 function toast(msg, action){
   const old = document.querySelector(".toast"); if (old) old.remove();
@@ -68,8 +90,8 @@ function toast(msg, action){
   document.body.appendChild(t);
   setTimeout(() => t.remove(), action ? 7000 : 2600);
 }
-async function copyText(text){
-  try { await navigator.clipboard.writeText(text); toast("Copied. Paste it in the group."); }
+async function copyText(text, done){
+  try { await navigator.clipboard.writeText(text); toast(done || "Copied."); }
   catch(e){
     openSheet(`<div class="grab"></div><h2>Copy this</h2><p class="muted">Select the text and copy it.</p><textarea id="copyArea" class="text" rows="10" readonly>${esc(text)}</textarea><button class="btn" id="sheetClose" type="button">Done</button>`);
     const a = $("#copyArea"); a.focus(); a.select(); $("#sheetClose").onclick = closeSheet;
@@ -77,7 +99,7 @@ async function copyText(text){
 }
 function failed(err){
   console.error(err);
-  toast((err && err.message && !/fetch/i.test(err.message)) ? err.message : "That didn't save. Check your connection and try again.");
+  toast((err && err.message && !/fetch|network/i.test(err.message)) ? err.message : "That didn't save. Check your connection and try again.");
 }
 
 // ---------- sheet ----------
@@ -89,7 +111,7 @@ function closeSheet(){ $("#overlay").innerHTML = ""; }
 
 // ---------- screens ----------
 function show(id){
-  ["setupScreen","authScreen","notPartnerScreen","appScreen"].forEach(s => $("#"+s).hidden = s !== id);
+  ["setupScreen","authScreen","onboardScreen","appScreen"].forEach(s => $("#"+s).hidden = s !== id);
 }
 
 // ---------- data ----------
@@ -107,29 +129,35 @@ async function once(btn, fn){
   btn.disabled = true;
   try { await fn(); } finally { btn.disabled = false; }
 }
-
 const soft = async (q, fallback) => { try { const r = await q; return r.error ? fallback : r.data; } catch(e){ return fallback; } };
-const SALE_COLS = "id,at,paid_to,method,note,recorded_by,sale_items(product_id,name,owner,price,qty)";
 
 async function loadAll(){
-  const sb = S.sb;
-  const [partners, shares, products, stock, moves, sales, settlements, orders, debts, notifs, messages] = await Promise.all([
-    soft(sb.from("partners").select("id,name,phone"), null).then(r => r || must(sb.from("partners").select("id,name"))),
-    must(sb.from("owner_shares").select("owner,partner_id,share").order("owner").order("partner_id")),
-    must(sb.from("products").select("*").order("sort").order("name")),
-    must(sb.rpc("stock_levels")),
-    must(sb.from("stock_moves").select("*").order("at",{ascending:false}).limit(8)),
-    soft(sb.from("sales").select(SALE_COLS + ",due_on,sale_payments(amount,at,method,paid_to)").order("at",{ascending:false}).limit(300), null)
-      .then(r => r || must(sb.from("sales").select(SALE_COLS).order("at",{ascending:false}).limit(300))),
-    must(sb.from("settlements").select("*").order("at",{ascending:false}).limit(20)),
-    soft(sb.from("orders").select("*").order("at",{ascending:false}).limit(60), []),
-    soft(sb.rpc("my_debts"), []),
-    soft(sb.from("notifications").select("*").order("id",{ascending:false}).limit(50), []),
-    soft(sb.from("messages").select("id,at,from_partner,body").order("id",{ascending:false}).limit(60), []),
+  const sb = S.sb, b = bid(), full = canSell();
+  const [partners, shares, orders, notifs, messages, fees, unread] = await Promise.all([
+    must(sb.from("partners").select("id,name,phone,role,status").eq("business_id", b).neq("status","removed")),
+    must(sb.rpc("my_groups", {p_biz: b})),
+    must(sb.from("orders").select("*").eq("business_id", b).order("at",{ascending:false}).limit(60)),
+    must(sb.from("notifications").select("*").eq("business_id", b).order("id",{ascending:false}).limit(50)),
+    must(sb.from("messages").select("id,at,from_partner,body").eq("business_id", b).order("id",{ascending:false}).limit(60)),
+    soft(sb.from("order_fees").select("order_id,fee"), []),
+    soft(sb.from("notifications").select("business_id").is("read_at", null).limit(300), []),
   ]);
+  let products = [], stock = [], moves = [], sales = [], settlements = [], debts = [];
+  if (full){
+    [products, stock, moves, sales, settlements, debts] = await Promise.all([
+      must(sb.from("products").select("*").eq("business_id", b).order("sort").order("name")),
+      must(sb.rpc("stock_levels", {p_biz: b})),
+      must(sb.from("stock_moves").select("*").eq("business_id", b).order("at",{ascending:false}).limit(8)),
+      must(sb.rpc("sales_timeline", {p_biz: b, p_limit: 300})),
+      must(sb.from("settlements").select("*").eq("business_id", b).order("at",{ascending:false}).limit(20)),
+      must(sb.rpc("my_debts", {p_biz: b})),
+    ]);
+  }
   Object.assign(S, {partners, shares, products, moves, sales, settlements, orders, debts, notifs, messages});
+  S.orderFees = {}; for (const f of fees) S.orderFees[f.order_id] = num(f.fee);
   S.stock = {}; for (const r of stock) S.stock[r.product_id] = r.qty;
-  S.money = await must(sb.rpc("my_money", {p_from: periodStart()}));
+  S.unreadBy = {}; for (const u of unread) S.unreadBy[u.business_id] = (S.unreadBy[u.business_id] || 0) + 1;
+  S.money = isDelivery() ? null : await must(sb.rpc("my_money", {p_biz: b, p_from: periodStart()}));
   S.loaded = true;
   announceNew();
 }
@@ -143,22 +171,75 @@ function announceNew(){
   S.seenNotif = Math.max(S.seenNotif || 0, top);
 }
 async function refresh(quiet){
-  try { await loadAll(); render(); }
-  catch(e){ if (!quiet) failed(e); }
+  if (!S.biz) return;
+  const mine = bid();
+  try { await loadAll(); if (S.biz && bid() === mine) render(); }
+  catch(e){
+    // Lost access (removed from the business, or it was deleted)? Find out and move on instead of showing errors.
+    if (/not part of this business|permission denied|can't|cannot/i.test((e && e.message) || "")){
+      if (await reloadBusinesses()) return;
+    }
+    if (!quiet) failed(e);
+  }
 }
+
+// ---------- businesses ----------
+async function loadBusinesses(){
+  await S.sb.rpc("claim_memberships");                    // accept any invitation waiting for this email
+  S.businesses = await must(S.sb.rpc("my_businesses"));
+}
+// Re-read the list. Returns true if it moved the person somewhere else (a different business or onboarding).
+async function reloadBusinesses(){
+  try { await loadBusinesses(); } catch(e){ return false; }
+  const cur = S.biz && S.businesses.find(x => x.id === S.biz.id);
+  if (cur){ S.biz = cur; S.me = cur.member_id; return false; }
+  if (S.businesses.length){ toast("You no longer have access to that business."); await openBusiness(S.businesses[0].id); return true; }
+  S.biz = null; showOnboarding(); return true;
+}
+async function openBusiness(id, keepTab){
+  const b = S.businesses.find(x => x.id === id); if (!b) return;
+  S.biz = b; S.me = b.member_id; store.set("busynes.biz", id);
+  Object.assign(S, {partners:[], shares:[], products:[], stock:{}, moves:[], sales:[], settlements:[], money:null, orders:[], debts:[], notifs:[],
+    messages:[], seenNotif:null, fromOrder:null, orderFees:{}, cart:{}, loaded:false, editing:null, confirmDel:null, members:null, salesFilter:"all", period:"settle"});
+  draft = freshDraft();
+  // Switching business lands on a normal start screen; opening the app again keeps where you were.
+  if (!NAV().includes(S.tab) && !(keepTab && (S.tab === "team" || S.tab === "settings"))) S.tab = NAV()[0];
+  closeSheet(); show("appScreen"); render();
+  await refresh();
+  if (S.tab === "settings" && !S.members) { try { await loadMembers(); render(); } catch(e){} }
+}
+function showOnboarding(){
+  $("#obEmail").textContent = (S.user && S.user.email) || "";
+  const nm = $("#obName"); if (!nm.value) nm.value = ((S.user && S.user.email) || "").split("@")[0].replace(/[._-]+/g," ").replace(/\b\w/g, c => c.toUpperCase()).slice(0, 40);
+  show("onboardScreen");
+}
+async function createBusiness(name, kind, myName){
+  const id = await must(S.sb.rpc("create_business", {p_name: name, p_kind: kind, p_my_name: myName}));
+  await loadBusinesses();
+  await openBusiness(id);
+  toast("Your business is ready. Add what you sell on the Stock tab.");
+}
+async function loadMembers(){ S.members = await must(S.sb.rpc("list_members", {p_biz: bid()})); }
 
 // ---------- render ----------
 function render(){
-  $("#meName").textContent = (S.partners.find(p => p.id === S.me) || {}).name || "";
-  document.querySelectorAll("[data-tab]").forEach(b => b.setAttribute("aria-selected", String(b.dataset.tab === S.tab)));
+  if (!S.biz) return;
+  $("#meName").textContent = ((S.partners.find(p => p.id === S.me) || {}).name || "").split(" ")[0];
+  $("#bizName").textContent = S.biz.name;
+  const others = Object.entries(S.unreadBy).some(([k, n]) => k !== bid() && n > 0);
+  $("#bizBtn").classList.toggle("dot", others);
+  const nav = NAV();
+  document.querySelectorAll("[data-tab]").forEach(b => { b.hidden = !nav.includes(b.dataset.tab); b.setAttribute("aria-selected", String(b.dataset.tab === S.tab)); });
+  $(".tabs .inner").style.gridTemplateColumns = `repeat(${nav.length}, 1fr)`;
   let html;
-  if (!S.loaded) html = `<div class="empty"><b>Loading the shop…</b>Fetching products, stock and sales.</div>`;
+  if (!S.loaded) html = `<div class="empty"><b>Loading…</b>Fetching your business.</div>`;
   else if (S.tab === "sell") html = viewSell();
   else if (S.tab === "orders") html = viewOrders();
   else if (S.tab === "owed") html = viewOwed();
   else if (S.tab === "stock") html = viewStock();
   else if (S.tab === "sales") html = viewSales();
   else if (S.tab === "team") html = viewTeam();
+  else if (S.tab === "settings") html = viewSettings();
   else html = viewReport();
   // Don't wipe a half-typed chat message when the screen refreshes.
   const chat = $("#chatInput"), keep = chat && {v: chat.value, focus: document.activeElement === chat};
@@ -172,28 +253,29 @@ function render(){
 }
 
 function viewSell(){
-  if (!S.products.length) return `<div class="empty"><b>No products yet</b>Add your drinks and prices on the Stock tab, then come back here to sell.</div>`;
-  const os = owners();
+  if (!S.products.length) return `<div class="empty"><b>No products yet</b>${canManage() ? "Add what you sell and its price on the Stock tab, then come back here to sell." : "The owner hasn't added any products yet."}</div>`;
+  const os = owners(), single = Object.keys(os).length === 1;
   let h = "";
   for (const o of Object.values(os)){
     const ps = S.products.filter(p => p.owner === o.id && !p.hidden);
     if (!ps.length) continue;
-    h += `<section><div class="owner-head"><span class="owner-tag"><i style="background:${o.color}"></i>${esc(o.name)}'s</span><span class="eyebrow">Tap to add</span></div><div class="grid">`;
+    h += `<section>${single ? "" : `<div class="owner-head"><span class="owner-tag"><i style="background:${o.color}"></i>${esc(o.name)}'s</span><span class="eyebrow">Tap to add</span></div>`}<div class="grid">`;
     for (const p of ps){
-      const q = S.cart[p.id] || 0, st = (S.stock[p.id] || 0) - q;
-      const cls = st <= 0 ? "out" : st <= LOW ? "low" : "";
+      const q = S.cart[p.id] || 0, tracked = p.track_stock !== false;
+      const st = tracked ? (S.stock[p.id] || 0) - q : null;
+      const cls = !tracked ? "" : st <= 0 ? "out" : st <= LOW ? "low" : "";
       h += `<div style="position:relative;min-width:0">
         <button class="tile ${q ? "in" : ""}" type="button" data-add="${esc(p.id)}" aria-label="Add one ${esc(p.name)}">
           <span class="stripe" style="background:${o.color}"></span>
           <span class="name">${esc(p.name)}</span>
-          <span class="meta num"><span class="price">${money(p.price)}</span><span class="left ${cls}">${st <= 0 ? "None left" : st + " left"}</span></span>
+          <span class="meta num"><span class="price">${money(p.price)}</span>${tracked ? `<span class="left ${cls}">${st <= 0 ? "None left" : st + " left"}</span>` : ""}</span>
         </button>
         ${q ? `<span class="badge num" aria-hidden="true">${q}</span><button class="minus" type="button" data-sub="${esc(p.id)}" aria-label="Remove one ${esc(p.name)}">−</button>` : ""}
       </div>`;
     }
     h += `</div></section>`;
   }
-  return h;
+  return h || `<div class="empty"><b>Everything is hidden</b>Show a product again on the Stock tab.</div>`;
 }
 
 function cartLines(){
@@ -209,22 +291,32 @@ function renderCart(){
   $("#cartWhat").textContent = lines.map(l => l.qty + " × " + l.name).join(", ");
 }
 
-const freshDraft = () => ({paidTo:null, method:null, note:"", mode:"full", paid:"", due:""});
+const freshDraft = () => ({paidTo:null, method:null, note:"", mode:"full", paid:"", due:"", fee:"", feeTo:null});
 let draft = freshDraft();
 function checkout(){
   const lines = cartLines(); if (!lines.length) return;
   if (!draft.paidTo) draft.paidTo = S.me;
   if (!draft.method) draft.method = "transfer";
+  if (!draft.feeTo) draft.feeTo = S.me;
   const total = lines.reduce((a,l) => a + l.qty*l.price, 0);
-  const paidNow = () => draft.mode === "full" ? total : draft.mode === "credit" ? 0 : Math.min(total, Math.max(0, parseFloat(draft.paid) || 0));
+  // fee only applies to a loan; "paid now" is everything for full, a typed amount for part, nothing for credit/loan
+  const calc = () => {
+    const fee = draft.mode === "loan" ? Math.max(0, parseFloat(draft.fee) || 0) : 0, grand = total + fee;
+    const paid = draft.mode === "full" ? grand : draft.mode === "part" ? Math.min(grand, Math.max(0, parseFloat(draft.paid) || 0)) : 0;
+    return {fee, grand, paid, owed: grand - paid};
+  };
   openSheet(`<div class="grab"></div>
     <h2>Record this sale</h2>
     <div class="lines num">${lines.map(l => `<div class="line"><span>${l.qty} × ${esc(l.name)}</span><span>${money(l.qty*l.price)}</span></div>`).join("")}
       <div class="line total"><span>Total</span><span>${money(total)}</span></div></div>
-    <div class="field"><span class="lab">How much was paid?</span>
-      <div class="chips" role="group"><button type="button" class="chip" data-mode="full">Paid in full</button><button type="button" class="chip" data-mode="part">Paid part</button><button type="button" class="chip" data-mode="credit">On credit</button></div></div>
+    <div class="field"><span class="lab">How is it being paid?</span>
+      <div class="chips" role="group"><button type="button" class="chip" data-mode="full">Paid in full</button><button type="button" class="chip" data-mode="part">Paid part</button><button type="button" class="chip" data-mode="credit">On credit</button><button type="button" class="chip" data-mode="loan">Loan with a fee</button></div></div>
     <div class="field" id="partBox" hidden><label for="paidNow">Paid now (R)</label><input id="paidNow" class="text num" type="number" inputmode="decimal" min="0" max="${total}" step="1" value="${esc(draft.paid)}"></div>
-    <div class="field" id="dueBox" hidden><label for="dueOn">Promised to pay the rest on</label><input id="dueOn" class="text" type="date" value="${esc(draft.due)}">
+    <div class="field" id="feeBox" hidden><label for="feeAmt">Loan fee (R)</label><input id="feeAmt" class="text num" type="number" inputmode="decimal" min="0" step="1" placeholder="e.g. 50" value="${esc(draft.fee)}">
+      <span class="muted" style="font-size:13px">What you charge for lending. It's added to what they owe and it's yours, not the owners' of the items. Other people can't see it.</span></div>
+    <div class="field" id="feeToBox" hidden><span class="lab">Who keeps the fee?</span>
+      <div class="chips" role="group">${S.partners.map(p => `<button type="button" class="chip" data-feeto="${esc(p.id)}" aria-pressed="${draft.feeTo===p.id}">${esc(p.id === S.me ? "Me" : p.name)}</button>`).join("")}</div></div>
+    <div class="field" id="dueBox" hidden><label for="dueOn" id="dueLab">Promised to pay the rest on</label><input id="dueOn" class="text" type="date" value="${esc(draft.due)}">
       <div class="chips"><button type="button" class="chip" data-dueadd="3">In 3 days</button><button type="button" class="chip" data-dueadd="7">In a week</button><button type="button" class="chip" data-dueadd="14">In 2 weeks</button></div></div>
     <p class="banner" id="owedNote" hidden></p>
     <div class="field"><span class="lab" id="whoLab">Who got the money?</span>
@@ -234,19 +326,24 @@ function checkout(){
     <div class="field"><label for="saleNote" id="noteLab">Customer or note (optional)</label><input id="saleNote" class="text" maxlength="80" placeholder="e.g. Thando, block C" value="${esc(draft.note)}"></div>
     <div class="row"><button class="btn ghost" type="button" id="sheetCancel">Back</button><span class="spacer"></span><button class="btn" type="button" id="saveSale"></button></div>`);
   const sync = () => {
-    const paid = paidNow(), owed = total - paid;
+    const {fee, grand, paid, owed} = calc(), loan = draft.mode === "loan";
     document.querySelectorAll("[data-mode]").forEach(b => b.setAttribute("aria-pressed", String(b.dataset.mode === draft.mode)));
     $("#partBox").hidden = draft.mode !== "part";
+    $("#feeBox").hidden = !loan;
+    $("#feeToBox").hidden = !(loan && fee > 0);
     $("#dueBox").hidden = owed <= 0.005;
+    $("#dueLab").textContent = loan ? "Promised to pay it back on" : "Promised to pay the rest on";
     $("#methodBox").hidden = paid <= 0;
     $("#whoLab").textContent = paid <= 0 ? "Who is collecting the money?" : "Who got the money?";
     $("#noteLab").textContent = owed > 0.005 ? "Customer's name (needed so you know who owes)" : "Customer or note (optional)";
     const n = $("#owedNote"); n.hidden = owed <= 0.005;
-    n.textContent = owed > 0.005 ? `${draft.note.trim() || "The customer"} will owe ${money2(owed)}.` : "";
-    $("#saveSale").textContent = owed > 0.005 ? `Save · ${money2(paid)} now, ${money2(owed)} owed` : `Save sale · ${money(total)}`;
+    n.textContent = owed > 0.005 ? `${draft.note.trim() || "The customer"} will owe ${money2(owed)}${fee > 0 ? ` (${money(total)} + ${money2(fee)} fee)` : ""}.` : "";
+    $("#saveSale").textContent = loan ? `Save loan · owes ${money2(owed)}` : owed > 0.005 ? `Save · ${money2(paid)} now, ${money2(owed)} owed` : `Save sale · ${money(total)}`;
   };
-  document.querySelectorAll("[data-mode]").forEach(b => b.onclick = () => { draft.mode = b.dataset.mode; if (draft.mode === "part" && !draft.paid) $("#paidNow").focus(); sync(); });
+  document.querySelectorAll("[data-mode]").forEach(b => b.onclick = () => { draft.mode = b.dataset.mode; sync(); if (draft.mode === "part" && !draft.paid) $("#paidNow").focus(); if (draft.mode === "loan" && !draft.fee) $("#feeAmt").focus(); });
   $("#paidNow").oninput = e => { draft.paid = e.target.value; sync(); };
+  $("#feeAmt").oninput = e => { draft.fee = e.target.value; sync(); };
+  document.querySelectorAll("[data-feeto]").forEach(b => b.onclick = () => { draft.feeTo = b.dataset.feeto; document.querySelectorAll("[data-feeto]").forEach(x => x.setAttribute("aria-pressed", String(x===b))); });
   $("#dueOn").oninput = e => { draft.due = e.target.value; };
   document.querySelectorAll("[data-dueadd]").forEach(b => b.onclick = () => {
     const d = new Date(); d.setDate(d.getDate() + Number(b.dataset.dueadd));
@@ -258,29 +355,31 @@ function checkout(){
   $("#sheetCancel").onclick = closeSheet;
   sync();
   $("#saveSale").onclick = async e => {
-    const paid = paidNow(), owed = total - paid;
+    const {fee, grand, paid, owed} = calc();
     if (owed > 0.005 && !draft.note.trim()) return toast("Type the customer's name so you know who owes.");
     e.target.disabled = true;
-    const sale = {at:new Date().toISOString(), items:lines, total, paidTo:draft.paidTo, method:draft.method, note:draft.note.trim(), owed, due: owed > 0.005 && draft.due ? draft.due : null};
+    const sale = {at:new Date().toISOString(), items:lines, total, paidTo:draft.paidTo, method:draft.method, note:draft.note.trim(), due: owed > 0.005 && draft.due ? draft.due : null};
     try {
       await must(S.sb.rpc("record_sale", {
+        p_biz: bid(),
         p_items: lines.map(l => ({product_id:l.product_id, qty:l.qty})),
         p_paid_to: sale.paidTo, p_method: sale.method, p_note: sale.note,
         p_paid: paid, p_due: sale.due, p_order: S.fromOrder || null,
+        p_fee: fee, p_fee_to: fee > 0 ? (draft.feeTo || S.me) : null,
       }));
       S.cart = {}; S.fromOrder = null; draft = freshDraft();
       closeSheet();
-      toast(owed > 0.005 ? `Saved. ${sale.note} owes ${money2(owed)}.` : "Saved " + money(total) + " paid to " + pname(sale.paidTo) + ".",
-            {label:"Copy for group", run:() => copyText(saleText(sale))});
+      toast(fee > 0 ? `Loan saved. ${sale.note} owes ${money2(owed)}.` : owed > 0.005 ? `Saved. ${sale.note} owes ${money2(owed)}.` : "Saved " + money(total) + " paid to " + pname(sale.paidTo) + ".",
+            {label:"Copy for group", run:() => copyText(saleText(sale), "Copied. Paste it in your group.")});
       await refresh();
     } catch(err){ e.target.disabled = false; failed(err); }
   };
 }
+// The text you paste in a WhatsApp group: what was sold and where the money went. No amounts owed, no fees.
 function saleText(s){
-  const who = (S.partners.find(p => p.id === s.paidTo) || {name:s.paidTo}).name;
-  return `✅ Sale ${dayLabel(s.at)} ${timeLabel(s.at)}\n` + s.items.map(i => `${i.qty} × ${i.name} = ${money(i.qty*i.price)}`).join("\n") +
-    `\nTotal: ${money(s.total)}\nPaid to ${who} (${s.method === "cash" ? "cash" : "account"})` +
-    (s.owed > 0.005 ? `\nOwes: ${money2(s.owed)}${s.due ? " by " + dueText(s.due) : ""}` : "") + (s.note ? `\nNote: ${s.note}` : "");
+  const who = (S.partners.find(p => p.id === s.paidTo) || {name:"someone"}).name;
+  return `✅ Sale ${dayLabel(s.at)} ${timeLabel(s.at)}\n` + s.items.map(i => `${i.qty} × ${i.name}`).join("\n") +
+    `\nMoney with ${who}` + (s.note ? `\nNote: ${s.note}` : "");
 }
 
 // ---------- credit: dates and who owes ----------
@@ -295,14 +394,13 @@ function dueInfo(d){
   if (days <= 2) return {label:`Due ${dueText(d)}`, cls:"warn", rank:2};
   return {label:`Due ${dueText(d)}`, cls:"", rank:3};
 }
-const paidOf = s => (s.sale_payments || []).reduce((a,p) => a + num(p.amount), 0);
 
 function viewOwed(){
   const list = S.debts, m = S.money || {};
   const sum = list.reduce((a,d) => a + num(d.outstanding), 0);
   let h = `<h2>Who owes</h2>`;
   if (!list.length){
-    h += `<div class="empty"><b>Nobody owes you anything</b>When a customer pays part, or takes drinks on credit, it shows here with the date they promised.</div>`;
+    h += `<div class="empty"><b>Nobody owes you anything</b>When a customer pays part, or takes something on credit, it shows here with the date they promised.</div>`;
   } else {
     h += `<section class="kpis"><div class="kpi"><span class="eyebrow">Owed to you</span><b class="num">${money2(sum)}</b><span class="muted">${list.length} customer${list.length === 1 ? "" : "s"}</span></div>
       <div class="kpi"><span class="eyebrow">Overdue</span><b class="num">${list.filter(d => dueInfo(d.due_on).rank === 0).length}</b><span class="muted">${list.filter(d => dueInfo(d.due_on).rank <= 1).length} due now</span></div></section>`;
@@ -310,7 +408,7 @@ function viewOwed(){
       const di = dueInfo(d.due_on);
       return `<div class="debt"><div class="row"><span class="title">${esc(d.customer || "No name")}</span><span class="spacer"></span><b class="num">${money2(d.outstanding)}</b></div>
         <div class="sub">${esc(d.items)} · ${money2(d.paid)} of ${money2(d.total)} paid · ${dayLabel(d.at)}${d.paid_to !== S.me ? " · " + esc(Pname(d.paid_to)) + " collects" : ""}</div>
-        <div class="row" style="margin-top:6px"><span class="pill ${di.cls}">${esc(di.label)}</span><span class="spacer"></span>
+        <div class="row" style="margin-top:6px">${num(d.loan_fee) > 0 ? `<span class="pill warn">Loan · ${money2(d.loan_fee)} fee</span>` : ""}<span class="pill ${di.cls}">${esc(di.label)}</span><span class="spacer"></span>
           <button class="linkbtn" type="button" data-due="${d.sale_id}">Change date</button>
           <button class="linkbtn" type="button" data-remind="${d.sale_id}">Copy reminder</button>
           <button class="btn small" type="button" data-pay="${d.sale_id}">Got payment</button></div></div>`;
@@ -360,14 +458,19 @@ function reminderText(d){
 function viewOrders(){
   const open = S.orders.filter(o => o.status === "open"), past = S.orders.filter(o => o.status !== "open").slice(0, 8);
   const line = o => (o.items || []).map(i => i.qty + " × " + esc(i.name)).join(", ");
-  let h = `<div class="row"><h2>Orders</h2><span class="spacer"></span><button class="btn small" type="button" data-neworder>Add order</button></div>
-    <p class="muted" style="margin:-12px 0 0">Write down what people ask for. Everyone is told, and when you sell it the order is ticked off.</p>`;
-  if (!open.length) h += `<div class="empty"><b>No open orders</b>When someone asks for drinks, add it here so nobody forgets.</div>`;
+  let h = `<div class="row"><h2>Orders</h2><span class="spacer"></span>${canSell() ? `<button class="btn small" type="button" data-neworder>Add order</button>` : ""}</div>
+    <p class="muted" style="margin:-12px 0 0">${canSell() ? "Write down what people ask for. Everyone is told, and when you sell it the order is ticked off." : "Orders waiting to be delivered. Tap \"I'll take it\" so nobody else chases the same one."}</p>`;
+  if (!open.length) h += `<div class="empty"><b>No open orders</b>${canSell() ? "When someone asks for something, add it here so nobody forgets." : "New orders will show up here."}</div>`;
   else h += open.map(o => `<section class="card"><div class="row"><span class="title">${esc(o.customer || "No name")}</span><span class="spacer"></span><span class="muted">${dayLabel(o.at)} ${timeLabel(o.at)}</span></div>
       <div style="margin-top:6px">${line(o)}</div>
+      ${o.loan ? `<div style="margin-top:6px"><span class="pill warn">Loan</span>${S.orderFees[o.id] ? ` <span class="muted">your fee ${money2(S.orderFees[o.id])}</span>` : ""}</div>` : ""}
       ${o.note ? `<div class="sub">${esc(o.note)}</div>` : ""}
       <div class="sub">Added by ${esc(Pname(o.created_by))}</div>
-      <div class="row" style="margin-top:10px"><button class="linkbtn bad" type="button" data-cancelorder="${o.id}">Cancel</button><span class="spacer"></span><button class="btn small" type="button" data-fillorder="${o.id}">Sell this</button></div></section>`).join("");
+      ${o.claimed_by ? `<div style="margin-top:8px"><span class="pill ${o.claimed_by === S.me ? "" : "warn"}">${o.claimed_by === S.me ? "You're on it" : esc(Pname(o.claimed_by)) + " is on it"}</span></div>` : ""}
+      <div class="row" style="margin-top:10px">${canSell() ? `<button class="linkbtn bad" type="button" data-cancelorder="${o.id}">Cancel</button>` : ""}
+        ${o.claimed_by === S.me ? `<button class="linkbtn" type="button" data-release="${o.id}">Let go</button>` : ""}<span class="spacer"></span>
+        ${o.claimed_by ? "" : `<button class="btn small ${canSell() ? "ghost" : ""}" type="button" data-claim="${o.id}">I'll take it</button>`}
+        ${canSell() ? `<button class="btn small" type="button" data-fillorder="${o.id}">Sell this</button>` : ""}</div></section>`).join("");
   if (past.length) h += `<section><div class="eyebrow" style="margin-bottom:6px">Recent</div><div class="card list">` + past.map(o =>
     `<div class="item"><div class="main"><div class="title">${esc(o.customer || "No name")} <span class="pill">${o.status === "done" ? "sold" : "cancelled"}</span></div><div class="sub">${line(o)}</div></div></div>`).join("") + `</div></section>`;
   return h;
@@ -379,6 +482,9 @@ function newOrderSheet(){
   const prods = S.products.filter(p => !p.hidden);
   openSheet(`<div class="grab"></div><h2>Add an order</h2>
     <div class="field"><label for="ordCust">Customer</label><input id="ordCust" class="text" maxlength="60" placeholder="e.g. Lindiwe"></div>
+    <div class="field"><span class="lab">What kind of order?</span><div class="chips" role="group"><button type="button" class="chip" data-otype="normal" aria-pressed="true">Normal order</button><button type="button" class="chip" data-otype="loan" aria-pressed="false">Loan</button></div></div>
+    <div class="field" id="ordFeeBox" hidden><label for="ordFee">Loan fee (R)</label><input id="ordFee" class="text num" type="number" inputmode="decimal" min="0" step="1" placeholder="e.g. 50">
+      <span class="muted" style="font-size:13px">Whatever you plan to charge for lending. Only you can see this amount.</span></div>
     <div class="field"><span class="lab">What do they want?</span><div class="list card" style="padding-block:0">${os.map(o => prods.filter(p => p.owner === o.id).map(p =>
       `<div class="item" style="padding:8px 0"><div class="main"><div class="title">${esc(p.name)}</div><div class="sub num">${money(p.price)}</div></div>
         <div class="stepper"><button type="button" class="btn small ghost" data-oq="${esc(p.id)}" data-d="-1" aria-label="One less ${esc(p.name)}">−</button><b class="num" id="oq-${esc(p.id)}" style="min-width:22px;text-align:center">0</b><button type="button" class="btn small" data-oq="${esc(p.id)}" data-d="1" aria-label="One more ${esc(p.name)}">+</button></div></div>`).join("")).join("")}</div></div>
@@ -391,15 +497,20 @@ function newOrderSheet(){
     $("#oq-" + CSS.escape(id)).textContent = qty[id];
   });
   $("#sheetCancel").onclick = closeSheet;
-  let touched = false;
+  let touched = false, loan = false;
   $("#ordAt").oninput = () => { touched = true; };
+  document.querySelectorAll("[data-otype]").forEach(b => b.onclick = () => {
+    loan = b.dataset.otype === "loan"; $("#ordFeeBox").hidden = !loan;
+    document.querySelectorAll("[data-otype]").forEach(x => x.setAttribute("aria-pressed", String(x === b)));
+    if (loan) $("#ordFee").focus();
+  });
   $("#saveOrder").onclick = e => once(e.target, async () => {
     const items = Object.entries(qty).filter(([,q]) => q > 0).map(([product_id, q]) => ({product_id, qty:q}));
-    if (!items.length) return toast("Pick at least one drink.");
+    if (!items.length) return toast("Pick at least one item.");
     const when = $("#ordAt").value, at = touched && when ? new Date(when) : null;
     if (at && (isNaN(at) || at.getTime() > Date.now() + 5 * 60000)) return toast("The date can't be in the future.");
     try {
-      await must(S.sb.rpc("create_order", {p_customer: $("#ordCust").value.trim(), p_items: items, p_note: $("#ordNote").value.trim(), p_at: at ? at.toISOString() : null}));
+      await must(S.sb.rpc("create_order", {p_biz: bid(), p_customer: $("#ordCust").value.trim(), p_items: items, p_note: $("#ordNote").value.trim(), p_at: at ? at.toISOString() : null, p_loan: loan, p_fee: loan ? Math.max(0, parseFloat($("#ordFee").value) || 0) : 0}));
       closeSheet(); toast(at ? "Order saved with its date." : "Order saved. The others have been told."); await refresh();
     } catch(err){ failed(err); }
   });
@@ -411,6 +522,7 @@ function fillFromOrder(id){
   for (const i of o.items || []){ if (productById(i.product_id)) S.cart[i.product_id] = (S.cart[i.product_id] || 0) + i.qty; else skipped++; }
   S.fromOrder = o.id;
   draft = freshDraft(); draft.note = o.customer || "";
+  if (o.loan){ draft.mode = "loan"; if (S.orderFees[o.id]){ draft.fee = String(S.orderFees[o.id]); draft.feeTo = S.me; } }
   S.tab = "sell"; store.set("busynes.tab", "sell"); render(); window.scrollTo(0,0);
   toast(skipped ? "Order loaded, but " + skipped + " item(s) no longer exist." : "Order loaded. Check it and tap Record sale.");
 }
@@ -420,22 +532,23 @@ const waNumber = p => { let d = String(p || "").replace(/[^0-9]/g, ""); if (d.st
 function viewTeam(){
   const others = S.partners.filter(p => p.id !== S.me), me = S.partners.find(p => p.id === S.me) || {};
   let h = `<h2>Team</h2>`;
-  h += others.map(p => `<section class="card"><div class="row"><div class="main"><div class="title">${esc(p.name)}</div><div class="sub num">${p.phone ? esc(p.phone) : "No number saved yet"}</div></div></div>
+  h += others.map(p => `<section class="card"><div class="row"><div class="main"><div class="title">${esc(p.name)} <span class="pill">${esc(ROLE_NAME[p.role] || "")}</span></div><div class="sub num">${p.status === "invited" ? "Hasn't joined yet" : p.phone ? esc(p.phone) : "No number saved yet"}</div></div></div>
     <div class="row" style="margin-top:10px">${p.phone ? `<a class="btn small" href="tel:${esc(p.phone)}">Call</a><a class="btn small ghost" href="https://wa.me/${waNumber(p.phone)}" target="_blank" rel="noopener">WhatsApp</a>` : ""}
-      <button class="btn small ghost" type="button" data-ping="${esc(p.id)}">Ask ${esc(p.name)} to call me</button></div></section>`).join("");
+      ${p.status === "active" ? `<button class="btn small ghost" type="button" data-ping="${esc(p.id)}">Ask ${esc(p.name)} to call me</button>` : ""}</div></section>`).join("");
+  if (!others.length) h += `<div class="empty"><b>It's just you for now</b>${isOwner() ? "Invite your partners and staff from Business settings." : ""}</div>`;
   h += `<section class="card"><div class="field"><label for="myPhone">Your number, so the others can call you</label>
     <div class="stepper"><input id="myPhone" class="text num" type="tel" inputmode="tel" autocomplete="tel" value="${esc(me.phone || "")}" placeholder="082 123 4567" style="width:100%"><button class="btn small" type="button" data-savephone>Save</button></div></div></section>`;
   const msgs = S.messages.slice().reverse();
   h += `<section><div class="eyebrow" style="margin-bottom:6px">Chat</div><div class="card chat" id="chatBox">` +
     (msgs.length ? msgs.map(m => `<div class="msg ${m.from_partner === S.me ? "mine" : ""}"><div class="who"><b>${esc(Pname(m.from_partner))}</b> <span class="muted">${dayLabel(m.at)} ${timeLabel(m.at)}</span></div><div>${esc(m.body)}</div></div>`).join("")
-                : `<p class="muted" style="margin:0">No messages yet. This is for quick notes between the three of you.</p>`) +
-    `</div><form class="row" id="chatForm" style="margin-top:10px;flex-wrap:nowrap"><input id="chatInput" class="text" maxlength="500" placeholder="Message the partners" autocomplete="off" aria-label="Message"><button class="btn" type="submit">Send</button></form></section>`;
+                : `<p class="muted" style="margin:0">No messages yet. This is for quick notes between the people in this business.</p>`) +
+    `</div><form class="row" id="chatForm" style="margin-top:10px;flex-wrap:nowrap"><input id="chatInput" class="text" maxlength="500" placeholder="Message the team" autocomplete="off" aria-label="Message"><button class="btn" type="submit">Send</button></form></section>`;
   return h;
 }
 
 // ---------- alerts (bell) and phone notifications ----------
-const ICON = {sale:"🧾", credit:"📝", payment:"💵", order:"🛒", reminder:"⏰", chat:"💬", stock:"📦", call:"📞"};
-const KIND_TAB = {sale:"sales", credit:"owed", payment:"owed", reminder:"owed", order:"orders", chat:"team", call:"team", stock:"stock"};
+const ICON = {sale:"🧾", credit:"📝", payment:"💵", order:"🛒", reminder:"⏰", chat:"💬", stock:"📦", call:"📞", member:"👋", settle:"🤝"};
+const KIND_TAB = {sale:"sales", credit:"owed", payment:"owed", reminder:"owed", order:"orders", chat:"team", call:"team", stock:"stock", member:"settings", settle:"report"};
 const unreadCount = () => S.notifs.filter(n => !n.read_at).length;
 function renderBadges(){
   const b = $("#bellBadge"), n = unreadCount();
@@ -488,38 +601,43 @@ function notifSheet(){
   if (unread.size){
     const top = Math.max(...unread);
     S.notifs.forEach(n => { if (!n.read_at) n.read_at = new Date().toISOString(); });
+    S.unreadBy[bid()] = 0;
     renderBadges();
-    S.sb.rpc("mark_notifications_read", {p_up_to: top}).then(() => {}, () => {});
+    S.sb.rpc("mark_notifications_read", {p_biz: bid(), p_up_to: top}).then(() => {}, () => {});
   }
 }
-const TABS = ["sell","orders","owed","stock","sales","report","team"];
 function goTab(t){
   if (!TABS.includes(t)) t = "sell";
+  if (!NAV().includes(t) && t !== "team" && t !== "settings") t = NAV()[0];
   S.tab = t; store.set("busynes.tab", t); S.confirmDel = null; S.editing = null; render(); window.scrollTo(0,0);
+  if (t === "settings") loadMembers().then(render, failed);
 }
 
+// ---------- stock ----------
 function viewStock(){
-  const os = owners();
-  let h = `<div class="row"><h2>Stock on hand</h2><span class="spacer"></span><button class="btn small" type="button" data-newprod>Add product</button></div>
-    <p class="muted" style="margin:-12px 0 0">Stock drops by itself with every sale. Add deliveries when you buy, or do a fridge count to correct it.</p>`;
-  if (!S.products.length) return h + `<div class="empty"><b>No products yet</b>Tap Add product to set up your first drink.</div>`;
+  const os = owners(), single = Object.keys(os).length === 1;
+  let h = `<div class="row"><h2>Stock on hand</h2><span class="spacer"></span>${canManage() ? `<button class="btn small" type="button" data-newprod>Add product</button>` : ""}</div>
+    <p class="muted" style="margin:-12px 0 0">Stock drops by itself with every sale. Add deliveries when you buy more, or do a stock count to correct it.</p>`;
+  if (!S.products.length) return h + `<div class="empty"><b>No products yet</b>${canManage() ? "Tap Add product to set up the first thing you sell." : "The owner hasn't added any products yet."}</div>`;
   for (const o of Object.values(os)){
     const list = S.products.filter(p => p.owner === o.id); if (!list.length) continue;
-    h += `<section class="card"><div class="owner-head"><span class="owner-tag"><i style="background:${o.color}"></i>${esc(o.name)}'s</span></div><div class="list">`;
+    h += `<section class="card">${single ? "" : `<div class="owner-head"><span class="owner-tag"><i style="background:${o.color}"></i>${esc(o.name)}'s</span></div>`}<div class="list">`;
     for (const p of list){
-      const n = S.stock[p.id] || 0, cls = n <= 0 ? "out" : n <= LOW ? "low" : "";
+      const tracked = p.track_stock !== false, n = S.stock[p.id] || 0, cls = !tracked ? "" : n <= 0 ? "out" : n <= LOW ? "low" : "";
       if (S.editing === p.id){
         h += `<div class="item" style="flex-direction:column;align-items:stretch;gap:12px">
-          <div class="title">${esc(p.name)} <span class="muted">· ${n} in stock</span></div>
-          <div class="row"><div class="field" style="flex:1;min-width:120px"><label for="addQty">Delivery: add</label><div class="stepper"><input id="addQty" class="text num" type="number" inputmode="numeric" min="1" step="1" placeholder="0"><button class="btn small" type="button" data-doadd="${esc(p.id)}">Add</button></div></div>
-          <div class="field" style="flex:1;min-width:120px"><label for="countQty">Fridge count: set to</label><div class="stepper"><input id="countQty" class="text num" type="number" inputmode="numeric" min="0" step="1" placeholder="${Math.max(n,0)}"><button class="btn small ghost" type="button" data-docount="${esc(p.id)}">Set</button></div></div></div>
+          <div class="title">${esc(p.name)} <span class="muted">${tracked ? "· " + n + " in stock" : "· stock not tracked"}</span></div>
+          ${tracked ? `<div class="row"><div class="field" style="flex:1;min-width:120px"><label for="addQty">Delivery: add</label><div class="stepper"><input id="addQty" class="text num" type="number" inputmode="numeric" min="1" step="1" placeholder="0"><button class="btn small" type="button" data-doadd="${esc(p.id)}">Add</button></div></div>
+          <div class="field" style="flex:1;min-width:120px"><label for="countQty">Stock count: set to</label><div class="stepper"><input id="countQty" class="text num" type="number" inputmode="numeric" min="0" step="1" placeholder="${Math.max(n,0)}"><button class="btn small ghost" type="button" data-docount="${esc(p.id)}">Set</button></div></div></div>` : ""}
+          ${canManage() ? `<div class="field"><label for="nameIn">Name</label><div class="stepper"><input id="nameIn" class="text" maxlength="40" value="${esc(p.name)}" style="width:100%"><button class="btn small ghost" type="button" data-doname="${esc(p.id)}">Save</button></div></div>
           <div class="row"><div class="field" style="flex:1;min-width:120px"><label for="priceIn">Price (R)</label><div class="stepper"><input id="priceIn" class="text num" type="number" inputmode="decimal" min="0" step="1" value="${num(p.price)}"><button class="btn small ghost" type="button" data-doprice="${esc(p.id)}">Save</button></div></div>
           <div class="field" style="flex:1;min-width:120px"><span class="lab">On the Sell screen</span><button class="btn small ghost" type="button" data-dohide="${esc(p.id)}">${p.hidden ? "Show it again" : "Hide it"}</button></div></div>
+          <div class="field"><span class="lab">Count how many are left?</span><button class="btn small ghost" type="button" data-dotrack="${esc(p.id)}">${tracked ? "Stop tracking stock" : "Start tracking stock"}</button></div>` : ""}
           <div class="row end"><button class="btn small ghost" type="button" data-editdone>Close</button></div>
         </div>`;
       } else {
-        h += `<div class="item"><div class="main"><div class="title">${esc(p.name)}${p.hidden ? ` <span class="pill">hidden</span>` : ""}</div><div class="sub num">${money(p.price)} each${n <= 0 ? " · restock needed" : n <= LOW ? " · running low" : ""}</div></div>
-          <div class="stockn num ${cls}">${n}</div><button class="btn small ghost" type="button" data-edit="${esc(p.id)}" aria-label="Update ${esc(p.name)}">Update</button></div>`;
+        h += `<div class="item"><div class="main"><div class="title">${esc(p.name)}${p.hidden ? ` <span class="pill">hidden</span>` : ""}</div><div class="sub num">${money(p.price)} each${!tracked ? " · stock not tracked" : n <= 0 ? " · restock needed" : n <= LOW ? " · running low" : ""}</div></div>
+          ${tracked ? `<div class="stockn num ${cls}">${n}</div>` : ""}<button class="btn small ghost" type="button" data-edit="${esc(p.id)}" aria-label="Update ${esc(p.name)}">Update</button></div>`;
       }
     }
     h += `</div></section>`;
@@ -527,48 +645,56 @@ function viewStock(){
   if (S.moves.length){
     h += `<section><div class="eyebrow" style="margin-bottom:6px">Recent stock changes</div><div class="card list">` + S.moves.map(m => {
       const p = productById(m.product_id);
-      return `<div class="item"><div class="main"><div class="title">${m.kind === "add" ? "+" + m.qty : "Counted " + m.qty} ${esc(p ? p.name : m.product_id)}</div><div class="sub">${dayLabel(m.at)} ${timeLabel(m.at)} · ${esc(Pname(m.by))}</div></div></div>`;
+      return `<div class="item"><div class="main"><div class="title">${m.kind === "add" ? "+" + m.qty : "Counted " + m.qty} ${esc(p ? p.name : "an item")}</div><div class="sub">${dayLabel(m.at)} ${timeLabel(m.at)} · ${esc(Pname(m.by))}</div></div></div>`;
     }).join("") + `</div></section>`;
   }
   return h;
 }
 
 function newProductSheet(){
-  const os = Object.values(owners());
+  const os = Object.values(owners()), multi = os.length > 1;
   openSheet(`<div class="grab"></div><h2>Add a product</h2>
-    <div class="field"><label for="npName">Name</label><input id="npName" class="text" maxlength="40" placeholder="e.g. Hunter's Dry"></div>
+    <div class="field"><label for="npName">Name</label><input id="npName" class="text" maxlength="40" placeholder="e.g. Cheese burger"></div>
     <div class="field"><label for="npPrice">Selling price (R)</label><input id="npPrice" class="text num" type="number" inputmode="decimal" min="0" step="1"></div>
-    <div class="field"><span class="lab">Whose stock is it?</span><div class="chips">${os.map((o,i) => `<button type="button" class="chip" data-npowner="${esc(o.id)}" aria-pressed="${i===0}">${esc(o.name)}</button>`).join("")}</div></div>
+    ${multi ? `<div class="field"><span class="lab">Whose stock is it?</span><div class="chips">${os.map((o,i) => `<button type="button" class="chip" data-npowner="${esc(o.id)}" aria-pressed="${i===0}">${esc(o.name)}</button>`).join("")}</div></div>` : ""}
+    <div class="field"><span class="lab">Count how many are left?</span><div class="chips"><button type="button" class="chip" data-nptrack="yes" aria-pressed="true">Yes, track stock</button><button type="button" class="chip" data-nptrack="no" aria-pressed="false">No (made to order)</button></div></div>
     <div class="row"><button class="btn ghost" type="button" id="sheetCancel">Cancel</button><span class="spacer"></span><button class="btn" type="button" id="npSave">Add product</button></div>`);
-  let owner = os[0] && os[0].id;
+  let owner = os[0] && os[0].id, track = true;
   document.querySelectorAll("[data-npowner]").forEach(b => b.onclick = () => { owner = b.dataset.npowner; document.querySelectorAll("[data-npowner]").forEach(x => x.setAttribute("aria-pressed", String(x===b))); });
+  document.querySelectorAll("[data-nptrack]").forEach(b => b.onclick = () => { track = b.dataset.nptrack === "yes"; document.querySelectorAll("[data-nptrack]").forEach(x => x.setAttribute("aria-pressed", String(x===b))); });
   $("#sheetCancel").onclick = closeSheet;
   $("#npSave").onclick = async e => {
     const name = $("#npName").value.trim(), price = parseFloat($("#npPrice").value);
     if (!name || !(price >= 0)) { toast("Give it a name and a price."); return; }
-    let id = slug(name); if (productById(id)) id += "-" + Date.now().toString(36);
     e.target.disabled = true;
-    try { await must(S.sb.from("products").insert({id, name, price, owner, sort:99})); closeSheet(); toast(name + " added."); await refresh(); }
+    try { await must(S.sb.rpc("add_product", {p_biz: bid(), p_name: name, p_price: price, p_group: owner, p_track: track})); closeSheet(); toast(name + " added."); await refresh(); }
     catch(err){ e.target.disabled = false; failed(err); }
   };
 }
 
+// ---------- sales ----------
 function viewSales(){
-  if (!S.sales.length) return `<h2>Sales</h2><div class="empty"><b>No sales to show yet</b>You'll see sales paid to you, sales you recorded, and sales of your own products.</div>`;
-  let h = `<h2>Sales</h2><p class="muted" style="margin:-12px 0 0">Showing sales paid to you, sales you recorded, and sales of your own products. Other partners' money stays private.</p>`, cur = "";
-  const visibleTotal = s => s.sale_items.reduce((a,i) => a + num(i.price)*i.qty, 0);
-  for (const s of S.sales){
+  const mine = x => x.paid_to === S.me || x.recorded_by === S.me;
+  const list = S.salesFilter === "mine" ? S.sales.filter(mine) : S.sales;
+  let h = `<h2>Sales</h2><p class="muted" style="margin:-12px 0 0">Everything that's been sold, newest first: what, when, who sold it and where the money went. Amounts only show for your own products and for sales you handled${S.biz.privacy === "shared" && canManage() ? ", plus everything else if you're an owner or partner" : ""}.</p>
+    <div class="chips" role="group">${[["all","Everyone's"],["mine","Mine"]].map(([k,l]) => `<button type="button" class="chip" data-sfilter="${k}" aria-pressed="${S.salesFilter===k}">${l}</button>`).join("")}</div>`;
+  if (!list.length) return h + `<div class="empty"><b>No sales to show yet</b>${S.salesFilter === "mine" ? "Sales you recorded or were paid for will show here." : "Sales recorded by anyone in the business will show here."}</div>`;
+  let cur = "";
+  for (const s of list){
     const k = dayKey(s.at);
     if (k !== cur){
       if (cur) h += `</div></section>`;
       h += `<section class="day"><div class="owner-head"><span class="eyebrow">${dayLabel(s.at)}</span></div><div class="card" style="padding-block:2px">`;
       cur = k;
     }
-    const whole = s.paid_to === S.me || s.recorded_by === S.me;
-    const canDel = whole, del = S.confirmDel === s.id;
-    h += `<div class="sale"><div class="top"><span class="what">${s.sale_items.map(i => i.qty + " × " + esc(i.name)).join(", ")}</span><b class="num">${money(visibleTotal(s))}</b></div>
-      <div class="row" style="gap:6px;font-size:13px"><span class="pill ${s.method==="cash"?"cash":""}">${s.method === "cash" ? "Cash" : "Account"} → ${esc(Pname(s.paid_to))}</span>${whole && s.sale_payments && visibleTotal(s) - paidOf(s) > 0.005 ? ` <span class="pill bad">Owes ${money2(visibleTotal(s) - paidOf(s))}</span>` : ""}
-      <span class="muted">${timeLabel(s.at)} · by ${esc(pname(s.recorded_by))}${s.note && whole ? " · " + esc(s.note) : ""}${whole ? "" : " · your items only"}</span><span class="spacer"></span>
+    const items = s.items || [], priced = items.filter(i => i.price != null);
+    const amount = s.whole && s.total != null ? num(s.total) : priced.reduce((a,i) => a + num(i.price)*i.qty, 0);
+    const owes = s.whole && s.total != null && s.paid != null ? num(s.total) - num(s.paid) : 0;
+    const del = S.confirmDel === s.id, canDel = s.whole && (mine(s) || isOwner());
+    h += `<div class="sale"><div class="top"><span class="what">${items.map(i => i.qty + " × " + esc(i.name)).join(", ")}</span>${s.whole || priced.length ? `<b class="num">${money(amount)}</b>` : ""}</div>
+      <div class="row" style="gap:6px;font-size:13px"><span class="pill ${s.method==="cash"?"cash":""}">${s.method === "cash" ? "Cash" : "Account"} → ${esc(Pname(s.paid_to))}</span>
+      ${owes > 0.005 ? `<span class="pill bad">Owes ${money2(owes)}</span>` : ""}${s.whole && num(s.loan_fee) > 0 ? `<span class="pill warn">Loan</span>` : ""}
+      <span class="muted">${timeLabel(s.at)} · sold by ${esc(pname(s.recorded_by))}${s.note ? " · " + esc(s.note) : ""}${!s.whole && priced.length ? " · amount is your items only" : ""}</span><span class="spacer"></span>
       ${canDel ? (del ? `<button class="linkbtn" type="button" data-nodel>Keep</button><button class="linkbtn bad" type="button" data-dodel="${s.id}">Yes, delete</button>` : `<button class="linkbtn" type="button" data-del="${s.id}">Delete</button>`) : ""}</div></div>`;
   }
   return h + `</div></section>`;
@@ -584,16 +710,17 @@ function viewReport(){
   const received = num(m.received), cash = num(m.received_cash), due = num(m.due), diff = Math.round((received - due)*100)/100;
   h += `<div class="kpis">
     <div class="kpi"><span class="eyebrow">Money you received</span><b class="num">${money2(received)}</b><span class="muted num">${money(cash)} cash · ${money(received - cash)} account</span></div>
-    <div class="kpi"><span class="eyebrow">Your share collected</span><b class="num">${money2(due)}</b><span class="muted num">of ${money(m.sold_value != null ? m.sold_value : due)} of your stock sold</span></div></div>`;
-  if (num(m.outstanding) > 0.005) h += `<section class="card statement">Customers still owe <b class="num">${money2(m.outstanding)}</b> on your products. It counts here once they pay.</section>`;
-  h += `<section class="card statement">${diff > 0 ? `You're holding <b class="num">${money2(diff)}</b> that belongs to your partners.`
-       : diff < 0 ? `Your partners are holding <b class="num">${money2(-diff)}</b> of your money.`
+    <div class="kpi"><span class="eyebrow">Your share collected</span><b class="num">${money2(due)}</b><span class="muted num">${money(m.sold_value != null ? m.sold_value : due)} of your stock sold${num(m.fees) > 0.005 ? " · " + money2(m.fees) + " loan fees" : ""}</span></div></div>`;
+  if (num(m.outstanding) > 0.005) h += `<section class="card statement">Customers still owe <b class="num">${money2(m.outstanding)}</b> on your products and loan fees. It counts here once they pay.</section>`;
+  h += `<section class="card statement">${diff > 0 ? `You're holding <b class="num">${money2(diff)}</b> that belongs to the others.`
+       : diff < 0 ? `The others are holding <b class="num">${money2(-diff)}</b> of your money.`
        : `You hold exactly your own money.`}</section>`;
 
   h += `<section class="card"><div class="eyebrow">To settle up</div>`;
-  h += m.pays.length ? m.pays.map(p => `<div class="pay"><span>${p.from === S.me ? "You pay " + esc(pname(p.to)) : esc(pname(p.from)) + " pays you"}</span><span class="amt num ${p.from === S.me ? "pos" : "neg"}">${money2(p.amount)}</span></div>`).join("")
+  h += m.pays.length ? m.pays.map(p => `<div class="pay"><span>${esc(payText(p))}</span><span class="amt num ${payFromMe(p) ? "pos" : "neg"}">${money2(p.amount)}</span></div>`).join("")
     : `<p style="margin:8px 0 0">Nothing to hand over for you.</p>`;
-  h += `<div class="row" style="margin-top:12px"><button class="btn ghost small" type="button" data-copyreport>Copy my settle-up</button><span class="spacer"></span><button class="btn small" type="button" data-settle>Mark as settled</button></div></section>`;
+  if (m.pays.some(p => (p.from_ids || []).length > 1 || (p.to_ids || []).length > 1)) h += `<p class="muted" style="margin:10px 0 0;font-size:13px">Partners who run the same stock together settle as one, so it doesn't matter which of them gets the money.</p>`;
+  h += `<div class="row" style="margin-top:12px"><button class="btn ghost small" type="button" data-copyreport>Copy my settle-up</button><span class="spacer"></span>${canManage() ? `<button class="btn small" type="button" data-settle>Mark as settled</button>` : ""}</div></section>`;
 
   const sold = m.sold || [];
   if (sold.length){
@@ -604,22 +731,201 @@ function viewReport(){
   }
   return h;
 }
+// Settle-up lines. Partners who co-own stock can count as one team, so a line can be to/from more than one person.
+const payFromMe = p => (p.from_ids || [p.from]).includes(S.me);
+function payText(p){
+  const fromIds = p.from_ids || [p.from], toIds = p.to_ids || [p.to];
+  const names = ids => ids.map(id => (S.partners.find(x => x.id === id) || {name:"someone"}).name);
+  const others = ids => names(ids.filter(id => id !== S.me));
+  if (fromIds.includes(S.me)) return (fromIds.length > 1 ? "You or " + others(fromIds).join(" & ") + " pay " : "You pay ") + (p.to_name || names(toIds).join(" & ")) + (toIds.length > 1 ? " (either one)" : "");
+  if (toIds.includes(S.me)) return (p.from_name || names(fromIds).join(" & ")) + " pays you" + (toIds.length > 1 ? " or " + others(toIds).join(" & ") : "");
+  return (p.from_name || names(fromIds).join(" & ")) + " pays " + (p.to_name || names(toIds).join(" & "));
+}
 function reportText(){
   const m = S.money, me = (S.partners.find(p => p.id === S.me) || {}).name;
   const lbl = {settle:"since last settle-up", today:"today", week:"this week", all:"all time"}[S.period];
-  const nm = id => (S.partners.find(p => p.id === id) || {name:id}).name;
-  return `📊 ${me}'s settle-up (${lbl})\n` + (m.pays.length ? m.pays.map(p => `${nm(p.from)} → ${nm(p.to)}: ${money2(p.amount)}`).join("\n") : "Nothing to hand over.");
+  return `📊 ${me}'s settle-up (${lbl})\n` + (m.pays.length ? m.pays.map(p => `${payText(p)}: ${money2(p.amount)}`).join("\n") : "Nothing to hand over.");
 }
 function settleSheet(){
   openSheet(`<div class="grab"></div><h2>Mark as settled?</h2>
-    <p>Do this once all the settle-up money has changed hands between the three of you. "Since last settle-up" then starts again from zero for everyone. Old sales stay in the records.</p>
+    <p>Do this once all the settle-up money has changed hands between you and the others. "Since last settle-up" then starts again from zero for everyone. Old sales stay in the records.</p>
     <div class="row"><button class="btn ghost" type="button" id="sheetCancel">Not yet</button><span class="spacer"></span><button class="btn" type="button" id="doSettle">Yes, we're settled</button></div>`);
   $("#sheetCancel").onclick = closeSheet;
   $("#doSettle").onclick = async e => {
     e.target.disabled = true;
-    try { await must(S.sb.from("settlements").insert({by:S.me})); closeSheet(); S.period = "settle"; toast("Settled. Starting fresh."); await refresh(); }
+    try { await must(S.sb.rpc("mark_settled", {p_biz: bid()})); closeSheet(); S.period = "settle"; toast("Settled. Starting fresh."); await refresh(); }
     catch(err){ e.target.disabled = false; failed(err); }
   };
+}
+
+// ---------- business settings: people, ownership, privacy ----------
+function memberRow(m){
+  const owner = isOwner();
+  return `<div class="item"><div class="main"><div class="title">${esc(m.name)}${m.id === S.me ? ` <span class="muted">(you)</span>` : ""}</div>
+    <div class="sub">${esc(ROLE_NAME[m.role] || "")}${m.status === "invited" ? " · invited, hasn't joined yet" : ""}${owner && m.email ? " · " + esc(m.email) : ""}</div></div>
+    ${owner && m.role !== "owner" ? `<select class="text" style="width:auto" data-setrole="${esc(m.id)}" aria-label="Role of ${esc(m.name)}">${["partner","staff","delivery"].map(r => `<option value="${r}" ${m.role === r ? "selected" : ""}>${ROLE_NAME[r]}</option>`).join("")}</select>
+      <button class="linkbtn bad" type="button" data-rmember="${esc(m.id)}">Remove</button>` : ""}</div>`;
+}
+function groupCard(g){
+  const owner = isOwner(), cur = {};
+  for (const s of S.shares) if (s.owner === g) cur[s.partner_id] = num(s.share);
+  const eligible = (S.members || []).filter(m => m.role === "owner" || m.role === "partner");
+  const inGroup = eligible.filter(m => cur[m.id] > 0), prods = S.products.filter(p => p.owner === g).length;
+  let h = `<div class="group"><div class="row"><span class="title">${esc(niceGroup(g))}</span><span class="muted">${prods} product${prods === 1 ? "" : "s"}</span></div>`;
+  if (owner){
+    h += eligible.map(m => `<div class="row" style="margin-top:8px"><span class="main">${esc(m.name)}${m.status === "invited" ? " <span class='muted'>(invited)</span>" : ""}</span>
+      <input class="text num" style="width:92px" type="number" inputmode="decimal" min="0" max="100" step="0.01" placeholder="0" data-gs="${esc(g)}" data-gsm="${esc(m.id)}" value="${cur[m.id] ? Math.round(cur[m.id] * 10000) / 100 : ""}" aria-label="${esc(m.name)}'s share of ${esc(niceGroup(g))} in percent"> <span class="muted">%</span></div>`).join("");
+    h += `<div class="row" style="margin-top:10px"><span class="muted" id="gsum-${esc(g)}"></span><span class="spacer"></span>
+      ${groupIds().length > 1 ? `<button class="linkbtn bad" type="button" data-delgroup="${esc(g)}">Delete group</button>` : ""}<button class="btn small" type="button" data-savegroup="${esc(g)}">Save shares</button></div>`;
+  } else {
+    h += inGroup.map(m => `<div class="row" style="margin-top:6px"><span class="main">${esc(m.name)}</span><b class="num">${pct(cur[m.id])}</b></div>`).join("");
+  }
+  return h + `</div>`;
+}
+function viewSettings(){
+  const b = S.biz, owner = isOwner(), ms = S.members;
+  let h = `<h2>Business settings</h2>`;
+  h += `<section class="card"><div class="eyebrow">Business</div>
+    <div class="row" style="margin-top:6px"><div class="main"><div class="title">${esc(b.name)}</div><div class="sub">${esc(b.kind || "No type set")} · you are ${ROLE_NAME[b.role] === "Owner" ? "the owner" : "a " + ROLE_NAME[b.role].toLowerCase()}</div></div>${owner ? `<button class="btn small ghost" type="button" data-editbiz>Edit</button>` : ""}</div>
+    <div class="field" style="margin-top:14px"><span class="lab">Who can see the money?</span>
+      ${owner ? `<div class="chips">${[["shared","Owners and partners see everything"],["private","Everyone sees only their own"]].map(([k,l]) => `<button type="button" class="chip" data-privacy="${k}" aria-pressed="${b.privacy === k}">${l}</button>`).join("")}</div>`
+              : `<span>${b.privacy === "shared" ? "Owners and partners see everything" : "Everyone sees only their own sales and money"}</span>`}
+      <span class="muted" style="font-size:13px">Everyone can always see what was sold and when. This is about amounts, who owes what, and credit.</span></div>
+    <div class="field" style="margin-top:12px"><span class="lab">Settling up between partners</span>
+      ${owner ? `<div class="chips">${[[false,"Each partner separately"],[true,"Partners who share stock, as one team"]].map(([k,l]) => `<button type="button" class="chip" data-teamsettle="${k}" aria-pressed="${!!b.team_settle === k}">${l}</button>`).join("")}</div>`
+              : `<span>${b.team_settle ? "Partners who share stock settle up as one team" : "Each partner settles up separately"}</span>`}
+      <span class="muted" style="font-size:13px">"As one team" suits two partners running the same stock together: you pay them once, to either of them.</span></div></section>`;
+
+  h += `<section class="card"><div class="row"><div class="eyebrow">People</div><span class="spacer"></span>${owner ? `<button class="btn small" type="button" data-invite>Invite someone</button>` : ""}</div>`;
+  h += !ms ? `<p class="muted">Loading…</p>` : `<div class="list">${ms.map(memberRow).join("")}</div>`;
+  h += `<p class="muted" style="margin:10px 0 0;font-size:13px">Roles: <b>Partner</b> owns part of the business. <b>Staff</b> records sales, orders and stock. <b>Delivery</b> only sees and takes orders.</p></section>`;
+
+  if (canManage() && ms){
+    h += `<section class="card"><div class="row"><div class="eyebrow">Who owns what</div><span class="spacer"></span>${owner ? `<button class="btn small ghost" type="button" data-newgroup>New group</button>` : ""}</div>
+      <p class="muted" style="margin:6px 0 4px;font-size:13px">Each group of products is owned by one or more people, in percentages. The money from a sale is shared between the owners of what was sold, so a partner's cut never looks like it's all theirs. Changes apply to everything that hasn't been settled yet, so mark things as settled first if you want older sales left as they were.</p>
+      ${groupIds().map(groupCard).join("")}</section>`;
+  }
+
+  h += `<section class="card"><div class="eyebrow">Privacy</div>
+    <p style="margin:6px 0 10px">Only you and the people you invite can see this business. Other businesses on BusyNes can't see it, and there is no admin screen for anyone to browse it. <a href="privacy.html">Read how it works</a></p>
+    <div class="row"><span class="muted">BusyNes v${VERSION}</span></div></section>`;
+
+  h += `<section class="card"><div class="eyebrow">${owner ? "Danger zone" : "Leave"}</div>
+    ${owner ? `<p class="muted" style="margin:6px 0 10px;font-size:13px">Deleting a business removes all of its sales, stock, orders and people for good.</p><button class="btn danger small" type="button" data-delbiz>Delete this business</button>`
+            : `<p class="muted" style="margin:6px 0 10px;font-size:13px">You'll lose access straight away. Your past sales stay in the business's records.</p><button class="btn ghost small" type="button" data-leave>Leave this business</button>`}</section>`;
+  return h;
+}
+const gsSum = g => [...document.querySelectorAll(`[data-gs="${CSS.escape(g)}"]`)].reduce((a, i) => a + (parseFloat(i.value) || 0), 0);
+function updateGsum(g){
+  const el = $("#gsum-" + CSS.escape(g)); if (!el) return;
+  const t = Math.round(gsSum(g) * 100) / 100;
+  el.textContent = `Adds up to ${t}%`; el.style.color = Math.abs(t - 100) < 0.05 ? "var(--good)" : "var(--bad)";
+}
+async function setBusiness(patch){
+  await must(S.sb.rpc("update_business", Object.assign({p_biz: bid()}, patch)));
+  await loadBusinesses(); const cur = S.businesses.find(x => x.id === bid()); if (cur){ S.biz = cur; S.me = cur.member_id; }
+}
+function bizSheet(){
+  openSheet(`<div class="grab"></div><h2>Your businesses</h2>
+    <div class="list">${S.businesses.map(b => `<button type="button" class="notif" data-openbiz="${esc(b.id)}" aria-current="${b.id === bid()}"><span class="main"><b>${esc(b.name)}${b.id === bid() ? " ✓" : ""}</b><span class="sub">${esc(ROLE_NAME[b.role])}${b.kind ? " · " + esc(b.kind) : ""}</span></span>${S.unreadBy[b.id] && b.id !== bid() ? `<span class="pill bad">${S.unreadBy[b.id]} new</span>` : ""}</button>`).join("")}</div>
+    <div class="row"><button class="btn ghost" type="button" id="bizSettings">Business settings</button><span class="spacer"></span><button class="btn" type="button" id="bizNew">Start another business</button></div>
+    <button class="btn ghost" type="button" id="sheetCancel">Close</button>`);
+  $("#sheetCancel").onclick = closeSheet;
+  document.querySelectorAll("[data-openbiz]").forEach(b => b.onclick = () => { if (b.dataset.openbiz !== bid()) openBusiness(b.dataset.openbiz); else closeSheet(); });
+  $("#bizSettings").onclick = () => { closeSheet(); goTab("settings"); };
+  $("#bizNew").onclick = newBizSheet;
+}
+function newBizSheet(){
+  const mine = (S.partners.find(p => p.id === S.me) || {}).name || "";
+  openSheet(`<div class="grab"></div><h2>Start another business</h2>
+    <p class="muted">It will be completely separate from ${esc(S.biz.name)}. Nobody there will see it unless you invite them.</p>
+    <div class="field"><label for="nbName">Business name</label><input id="nbName" class="text" maxlength="60" placeholder="e.g. Fat Cook"></div>
+    <div class="field"><label for="nbKind">What do you sell? (optional)</label><input id="nbKind" class="text" maxlength="40" placeholder="e.g. Fast food"></div>
+    <div class="field"><label for="nbMe">Your name in it</label><input id="nbMe" class="text" maxlength="40" value="${esc(mine)}"></div>
+    <div class="row"><button class="btn ghost" type="button" id="sheetCancel">Cancel</button><span class="spacer"></span><button class="btn" type="button" id="nbSave">Create business</button></div>`);
+  $("#sheetCancel").onclick = closeSheet;
+  $("#nbSave").onclick = e => once(e.target, async () => {
+    const name = $("#nbName").value.trim(); if (!name) return toast("Give the business a name.");
+    try { await createBusiness(name, $("#nbKind").value.trim(), $("#nbMe").value.trim()); } catch(err){ failed(err); }
+  });
+}
+function inviteSheet(){
+  const gs = groupIds(), single = gs.length === 1;
+  let r = "partner";
+  openSheet(`<div class="grab"></div><h2>Invite someone</h2>
+    <div class="field"><label for="ivEmail">Their email</label><input id="ivEmail" class="text" type="email" autocomplete="off" placeholder="name@email.com"></div>
+    <div class="field"><label for="ivName">Their name (optional)</label><input id="ivName" class="text" maxlength="40"></div>
+    <div class="field"><span class="lab">What will they do?</span>
+      <div class="chips" role="group">${["partner","staff","delivery"].map(k => `<button type="button" class="chip" data-ivrole="${k}" aria-pressed="${k === r}">${ROLE_NAME[k]}</button>`).join("")}</div>
+      <span class="muted" style="font-size:13px" id="ivHelp">${ROLE_HELP[r]}</span></div>
+    <div class="field" id="ivShareBox"${single ? "" : " hidden"}><label for="ivShare">Their share of the business (%)</label><input id="ivShare" class="text num" type="number" inputmode="decimal" min="0" max="99" step="0.5" placeholder="e.g. 35">
+      <span class="muted" style="font-size:13px">You keep the rest. Leave it empty to set ownership later.</span></div>
+    ${single ? "" : `<p class="muted" style="font-size:13px" id="ivMulti">You have several product groups. Set a partner's share under "Who owns what" once they've joined.</p>`}
+    <div class="err" id="ivErr" role="alert" style="color:var(--bad);font-weight:600;min-height:1.4em"></div>
+    <div class="row"><button class="btn ghost" type="button" id="sheetCancel">Cancel</button><span class="spacer"></span><button class="btn" type="button" id="ivSave">Send invitation</button></div>`);
+  const sync = () => {
+    $("#ivHelp").textContent = ROLE_HELP[r];
+    if ($("#ivShareBox")) $("#ivShareBox").hidden = !(r === "partner" && single);
+    if ($("#ivMulti")) $("#ivMulti").hidden = r !== "partner";
+  };
+  document.querySelectorAll("[data-ivrole]").forEach(b => b.onclick = () => { r = b.dataset.ivrole; document.querySelectorAll("[data-ivrole]").forEach(x => x.setAttribute("aria-pressed", String(x === b))); sync(); });
+  $("#sheetCancel").onclick = closeSheet;
+  $("#ivSave").onclick = e => once(e.target, async () => {
+    const email = $("#ivEmail").value.trim(), name = $("#ivName").value.trim();
+    const share = r === "partner" && single ? (parseFloat($("#ivShare").value) || 0) : 0;
+    if (!email) { $("#ivErr").textContent = "Type their email address."; return; }
+    if (share < 0 || share >= 100) { $("#ivErr").textContent = "The share must be between 0 and 100%."; return; }
+    try {
+      await must(S.sb.rpc("invite_member", {p_biz: bid(), p_email: email, p_name: name, p_role: r, p_group: single ? gs[0] : null, p_share: share / 100}));
+      await Promise.all([loadMembers(), refresh(true)]);
+      inviteDoneSheet(email, name || email.split("@")[0], r);
+    } catch(err){ $("#ivErr").textContent = (err && err.message) || "That didn't work."; }
+  });
+}
+function inviteDoneSheet(email, name, r){
+  const msg = `Hi ${name}! I've added you to "${S.biz.name}" on BusyNes as ${ROLE_NAME[r].toLowerCase()}.\n\n1. Open ${appLink()}\n2. Tap "Create my login" using THIS email: ${email} (if you already have a BusyNes login, just sign in)\n3. Confirm your email from the message we send you, then sign in. "${S.biz.name}" will be waiting for you.`;
+  openSheet(`<div class="grab"></div><h2>Invitation saved</h2>
+    <p>${esc(name)} will see ${esc(S.biz.name)} as soon as they sign up or sign in with <b>${esc(email)}</b>. Send them this message:</p>
+    <textarea class="text" rows="9" readonly id="ivMsg">${esc(msg)}</textarea>
+    <div class="row"><button class="btn ghost" type="button" id="sheetCancel">Done</button><span class="spacer"></span><button class="btn" type="button" id="ivCopy">Copy message</button></div>`);
+  $("#sheetCancel").onclick = closeSheet;
+  $("#ivCopy").onclick = () => copyText(msg, "Copied. Send it to " + name + ".");
+}
+function editBizSheet(){
+  openSheet(`<div class="grab"></div><h2>Edit business</h2>
+    <div class="field"><label for="ebName">Business name</label><input id="ebName" class="text" maxlength="60" value="${esc(S.biz.name)}"></div>
+    <div class="field"><label for="ebKind">What do you sell?</label><input id="ebKind" class="text" maxlength="40" value="${esc(S.biz.kind || "")}"></div>
+    <div class="row"><button class="btn ghost" type="button" id="sheetCancel">Cancel</button><span class="spacer"></span><button class="btn" type="button" id="ebSave">Save</button></div>`);
+  $("#sheetCancel").onclick = closeSheet;
+  $("#ebSave").onclick = e => once(e.target, async () => {
+    const name = $("#ebName").value.trim(); if (!name) return toast("The business needs a name.");
+    try { await setBusiness({p_name: name, p_kind: $("#ebKind").value.trim()}); closeSheet(); toast("Saved."); render(); } catch(err){ failed(err); }
+  });
+}
+function confirmSheet(title, text, label, run, danger = true){
+  openSheet(`<div class="grab"></div><h2>${esc(title)}</h2><p>${text}</p>
+    <div class="row"><button class="btn ghost" type="button" id="sheetCancel">Cancel</button><span class="spacer"></span><button class="btn ${danger ? "danger" : ""}" type="button" id="cfGo">${esc(label)}</button></div>`);
+  $("#sheetCancel").onclick = closeSheet;
+  $("#cfGo").onclick = e => once(e.target, async () => { try { await run(); } catch(err){ failed(err); } });
+}
+function deleteBizSheet(){
+  openSheet(`<div class="grab"></div><h2>Delete ${esc(S.biz.name)}?</h2>
+    <p>This removes every sale, order, product, message and person in this business, for good. It can't be undone. Type the business name to confirm.</p>
+    <div class="field"><input id="dbName" class="text" autocomplete="off" placeholder="${esc(S.biz.name)}" aria-label="Type the business name"></div>
+    <div class="row"><button class="btn ghost" type="button" id="sheetCancel">Cancel</button><span class="spacer"></span><button class="btn danger" type="button" id="dbGo">Delete for good</button></div>`);
+  $("#sheetCancel").onclick = closeSheet;
+  $("#dbGo").onclick = e => once(e.target, async () => {
+    try {
+      await must(S.sb.rpc("delete_business", {p_biz: bid(), p_confirm: $("#dbName").value}));
+      closeSheet(); S.biz = null; await loadBusinesses();
+      toast("Business deleted.");
+      if (S.businesses.length) await openBusiness(S.businesses[0].id); else showOnboarding();
+    } catch(err){ failed(err); }
+  });
+}
+async function afterLeaving(msg){
+  closeSheet(); S.biz = null; await loadBusinesses(); toast(msg);
+  if (S.businesses.length) await openBusiness(S.businesses[0].id); else showOnboarding();
 }
 
 // ---------- events ----------
@@ -632,13 +938,20 @@ function bindView(){
   v.querySelectorAll("[data-newprod]").forEach(b => b.onclick = newProductSheet);
   v.querySelectorAll("[data-doadd]").forEach(b => b.onclick = () => once(b, () => stockMove(b.dataset.doadd, "add", $("#addQty").value)));
   v.querySelectorAll("[data-docount]").forEach(b => b.onclick = () => once(b, () => stockMove(b.dataset.docount, "count", $("#countQty").value)));
+  const updateProduct = async (id, patch, msg) => { try { await must(S.sb.rpc("update_product", Object.assign({p_id: id}, patch))); if (msg) toast(msg); await refresh(); } catch(err){ failed(err); } };
   v.querySelectorAll("[data-doprice]").forEach(b => b.onclick = () => once(b, async () => {
-    const price = parseFloat($("#priceIn").value); if (!(price >= 0)) return toast("Enter a price in rand.");
-    try { await must(S.sb.from("products").update({price}).eq("id", b.dataset.doprice)); toast("Price saved."); await refresh(); } catch(err){ failed(err); }
+    const price = parseFloat($("#priceIn").value); if (!(price >= 0)) return toast("Enter a price.");
+    await updateProduct(b.dataset.doprice, {p_price: price}, "Price saved.");
+  }));
+  v.querySelectorAll("[data-doname]").forEach(b => b.onclick = () => once(b, async () => {
+    const name = $("#nameIn").value.trim(); if (!name) return toast("Give it a name.");
+    await updateProduct(b.dataset.doname, {p_name: name}, "Name saved.");
   }));
   v.querySelectorAll("[data-dohide]").forEach(b => b.onclick = () => once(b, async () => {
-    const p = productById(b.dataset.dohide);
-    try { await must(S.sb.from("products").update({hidden: !p.hidden}).eq("id", p.id)); await refresh(); } catch(err){ failed(err); }
+    const p = productById(b.dataset.dohide); await updateProduct(p.id, {p_hidden: !p.hidden});
+  }));
+  v.querySelectorAll("[data-dotrack]").forEach(b => b.onclick = () => once(b, async () => {
+    const p = productById(b.dataset.dotrack); await updateProduct(p.id, {p_track: p.track_stock === false}, p.track_stock === false ? "Now tracking stock." : "Stock is no longer tracked.");
   }));
   v.querySelectorAll("[data-del]").forEach(b => b.onclick = () => { S.confirmDel = Number(b.dataset.del); render(); });
   v.querySelectorAll("[data-nodel]").forEach(b => b.onclick = () => { S.confirmDel = null; render(); });
@@ -646,16 +959,21 @@ function bindView(){
     try { await must(S.sb.rpc("delete_sale", {p_id: Number(b.dataset.dodel)})); S.confirmDel = null; toast("Sale deleted. Stock is back."); await refresh(); } catch(err){ failed(err); }
   }));
   v.querySelectorAll("[data-period]").forEach(b => b.onclick = async () => { S.period = b.dataset.period; render(); await refresh(); });
-  v.querySelectorAll("[data-copyreport]").forEach(b => b.onclick = () => copyText(reportText()));
+  v.querySelectorAll("[data-copyreport]").forEach(b => b.onclick = () => copyText(reportText(), "Copied. Paste it in your group."));
   v.querySelectorAll("[data-settle]").forEach(b => b.onclick = settleSheet);
   v.querySelectorAll("[data-neworder]").forEach(b => b.onclick = newOrderSheet);
   v.querySelectorAll("[data-fillorder]").forEach(b => b.onclick = () => fillFromOrder(Number(b.dataset.fillorder)));
   v.querySelectorAll("[data-cancelorder]").forEach(b => b.onclick = () => once(b, async () => {
     try { await must(S.sb.rpc("cancel_order", {p_id: Number(b.dataset.cancelorder)})); toast("Order cancelled."); await refresh(); } catch(err){ failed(err); }
   }));
+  v.querySelectorAll("[data-claim],[data-release]").forEach(b => b.onclick = () => once(b, async () => {
+    const take = b.dataset.claim != null, id = Number(take ? b.dataset.claim : b.dataset.release);
+    try { await must(S.sb.rpc("claim_order", {p_id: id, p_take: take})); toast(take ? "You're on it. The others have been told." : "Order released."); await refresh(); } catch(err){ failed(err); }
+  }));
+  v.querySelectorAll("[data-sfilter]").forEach(b => b.onclick = () => { S.salesFilter = b.dataset.sfilter; render(); });
   v.querySelectorAll("[data-pay]").forEach(b => b.onclick = () => paySheet(Number(b.dataset.pay)));
   v.querySelectorAll("[data-due]").forEach(b => b.onclick = () => dueSheet(Number(b.dataset.due)));
-  v.querySelectorAll("[data-remind]").forEach(b => b.onclick = () => { const d = S.debts.find(x => x.sale_id === Number(b.dataset.remind)); if (d) copyText(reminderText(d)); });
+  v.querySelectorAll("[data-remind]").forEach(b => b.onclick = () => { const d = S.debts.find(x => x.sale_id === Number(b.dataset.remind)); if (d) copyText(reminderText(d), "Copied. Paste it in a message to them."); });
   v.querySelectorAll("[data-ping]").forEach(b => b.onclick = () => once(b, async () => {
     try { await must(S.sb.rpc("ping_partner", {p_to: b.dataset.ping})); toast("Sent. They've been asked to call you."); } catch(err){ failed(err); }
   }));
@@ -667,16 +985,61 @@ function bindView(){
     e.preventDefault();
     const inp = $("#chatInput"), body = inp.value.trim(); if (!body) return;
     once(cf.querySelector("button"), async () => {
-      try { await must(S.sb.rpc("send_message", {p_body: body})); inp.value = ""; await refresh(); const box = $("#chatBox"); if (box) box.scrollTop = box.scrollHeight; }
+      try { await must(S.sb.rpc("send_message", {p_biz: bid(), p_body: body})); inp.value = ""; await refresh(); const box = $("#chatBox"); if (box) box.scrollTop = box.scrollHeight; }
       catch(err){ failed(err); }
     });
   };
+
+  // settings
+  v.querySelectorAll("[data-editbiz]").forEach(b => b.onclick = editBizSheet);
+  v.querySelectorAll("[data-privacy]").forEach(b => b.onclick = () => once(b, async () => {
+    try { await setBusiness({p_privacy: b.dataset.privacy}); toast("Saved."); await refresh(true); render(); } catch(err){ failed(err); }
+  }));
+  v.querySelectorAll("[data-teamsettle]").forEach(b => b.onclick = () => once(b, async () => {
+    try { await setBusiness({p_team_settle: b.dataset.teamsettle === "true"}); toast("Saved."); await refresh(true); render(); } catch(err){ failed(err); }
+  }));
+  v.querySelectorAll("[data-invite]").forEach(b => b.onclick = inviteSheet);
+  v.querySelectorAll("[data-setrole]").forEach(sel => sel.onchange = async () => {
+    try { await must(S.sb.rpc("update_member", {p_biz: bid(), p_member: sel.dataset.setrole, p_role: sel.value})); toast("Role changed."); await Promise.all([loadMembers(), refresh(true)]); render(); }
+    catch(err){ failed(err); await loadMembers().catch(() => {}); render(); }
+  });
+  v.querySelectorAll("[data-rmember]").forEach(b => b.onclick = () => {
+    const m = (S.members || []).find(x => x.id === b.dataset.rmember); if (!m) return;
+    confirmSheet(`Remove ${m.name}?`, "They lose access to this business straight away. Their past sales stay in the records.", "Remove",
+      async () => { await must(S.sb.rpc("remove_member", {p_biz: bid(), p_member: m.id})); closeSheet(); toast(m.name + " was removed."); await Promise.all([loadMembers(), refresh(true)]); render(); });
+  });
+  v.querySelectorAll("[data-gs]").forEach(i => i.oninput = () => updateGsum(i.dataset.gs));
+  groupIds().forEach(updateGsum);
+  v.querySelectorAll("[data-savegroup]").forEach(b => b.onclick = () => once(b, async () => {
+    const g = b.dataset.savegroup, shares = [];
+    document.querySelectorAll(`[data-gs="${CSS.escape(g)}"]`).forEach(i => { const p = parseFloat(i.value) || 0; if (p > 0) shares.push({partner_id: i.dataset.gsm, share: p / 100}); });
+    if (!shares.length) return toast("Choose who owns this group.");
+    if (Math.abs(gsSum(g) - 100) > 0.05) return toast("The shares must add up to 100%.");
+    try { await must(S.sb.rpc("set_group_shares", {p_biz: bid(), p_group: g, p_shares: shares})); toast("Ownership saved."); await refresh(true); render(); } catch(err){ failed(err); }
+  }));
+  v.querySelectorAll("[data-delgroup]").forEach(b => b.onclick = () => confirmSheet(`Delete the ${niceGroup(b.dataset.delgroup)} group?`, "Only possible when no products are in it.", "Delete group",
+    async () => { await must(S.sb.rpc("delete_group", {p_biz: bid(), p_group: b.dataset.delgroup})); closeSheet(); toast("Group deleted."); await refresh(true); render(); }));
+  v.querySelectorAll("[data-newgroup]").forEach(b => b.onclick = () => {
+    openSheet(`<div class="grab"></div><h2>New product group</h2>
+      <p class="muted">Use groups when different products are owned by different people, like one person's own stock and a second range shared between two partners.</p>
+      <div class="field"><label for="ngName">Group name</label><input id="ngName" class="text" maxlength="30" placeholder="e.g. Beers"></div>
+      <div class="row"><button class="btn ghost" type="button" id="sheetCancel">Cancel</button><span class="spacer"></span><button class="btn" type="button" id="ngSave">Create group</button></div>`);
+    $("#sheetCancel").onclick = closeSheet;
+    $("#ngSave").onclick = e => once(e.target, async () => {
+      const name = $("#ngName").value.trim(); if (!name) return toast("Give the group a name.");
+      let id = slug(name); if (groupIds().includes(id)) id += "-" + Date.now().toString(36).slice(-3);
+      try { await must(S.sb.rpc("set_group_shares", {p_biz: bid(), p_group: id, p_shares: [{partner_id: S.me, share: 1}]})); closeSheet(); toast("Group created. Now set who owns it."); await refresh(true); render(); } catch(err){ failed(err); }
+    });
+  });
+  v.querySelectorAll("[data-delbiz]").forEach(b => b.onclick = deleteBizSheet);
+  v.querySelectorAll("[data-leave]").forEach(b => b.onclick = () => confirmSheet("Leave this business?", "You'll lose access straight away. Your past sales stay in its records.", "Leave",
+    async () => { await must(S.sb.rpc("leave_business", {p_biz: bid()})); await afterLeaving("You left " + S.biz.name + "."); }));
 }
 async function stockMove(pid, kind, raw){
   const qty = parseInt(raw, 10);
-  if (!(qty >= (kind === "add" ? 1 : 0))) return toast(kind === "add" ? "Enter how many came in." : "Enter how many are in the fridge.");
+  if (!(qty >= (kind === "add" ? 1 : 0))) return toast(kind === "add" ? "Enter how many came in." : "Enter how many are left.");
   try {
-    await must(S.sb.from("stock_moves").insert({product_id:pid, kind, qty, by:S.me}));
+    await must(S.sb.rpc("add_stock_move", {p_biz: bid(), p_product: pid, p_kind: kind, p_qty: qty}));
     S.editing = null; toast(kind === "add" ? "Added " + qty + "." : "Stock set to " + qty + ".");
     await refresh();
   } catch(err){ failed(err); }
@@ -685,6 +1048,7 @@ async function stockMove(pid, kind, raw){
 document.querySelectorAll("[data-tab]").forEach(b => b.onclick = () => goTab(b.dataset.tab));
 $("#bellBtn").onclick = notifSheet;
 $("#teamBtn").onclick = () => goTab("team");
+$("#bizBtn").onclick = bizSheet;
 $("#cartClear").onclick = () => { S.cart = {}; S.fromOrder = null; render(); };
 $("#cartNext").onclick = checkout;
 $("#refreshBtn").onclick = () => refresh();
@@ -699,12 +1063,15 @@ $("#meBtn").onclick = () => {
   const install = isStandalone() ? "" : installEvent
     ? `<button class="btn amber" type="button" id="installBtn">Install BusyNes on this phone</button>`
     : isIOS() ? `<p class="muted">To install: tap the Share button in Safari, then <b>Add to Home Screen</b>.</p>` : "";
-  openSheet(`<div class="grab"></div><h2>Signed in as ${esc((S.partners.find(p => p.id === S.me) || {}).name)}</h2>
-    <p class="muted">${esc(S.user && S.user.email)}</p>
+  openSheet(`<div class="grab"></div><h2>${esc((S.partners.find(p => p.id === S.me) || {}).name || "You")}</h2>
+    <p class="muted">${esc(S.user && S.user.email)} · ${esc(ROLE_NAME[role()] || "")} at ${esc(S.biz.name)}</p>
     ${install}
+    <div class="row"><button class="btn ghost" type="button" id="meBiz">Switch business</button><span class="spacer"></span><button class="btn ghost" type="button" id="meSettings">Business settings</button></div>
     <div class="row"><button class="btn ghost" type="button" id="changePass">Change password</button><span class="spacer"></span><button class="btn danger" type="button" id="signOut">Sign out</button></div>
     <div class="row"><button class="btn ghost" type="button" id="sheetCancel">Close</button><span class="spacer"></span><span class="muted">BusyNes v${VERSION}</span></div>`);
   $("#sheetCancel").onclick = closeSheet;
+  $("#meBiz").onclick = bizSheet;
+  $("#meSettings").onclick = () => { closeSheet(); goTab("settings"); };
   $("#changePass").onclick = passwordSheet;
   $("#signOut").onclick = async () => { closeSheet(); await S.sb.auth.signOut(); };
   const ib = $("#installBtn");
@@ -730,19 +1097,18 @@ function passwordSheet(){
 // ---------- sign in ----------
 async function enter(session){
   S.user = session ? session.user : null;
-  if (!S.user){ S.loaded = false; show("authScreen"); return; }
-  const me = await S.sb.rpc("my_partner");
-  if (me.error){
-    // Usually no signal. Don't claim they're not a partner; retry when the connection is back.
-    show("appScreen"); S.loaded = false; render();
+  if (!S.user){ S.loaded = false; S.biz = null; S.businesses = []; show("authScreen"); return; }
+  try { await loadBusinesses(); }
+  catch(e){
+    // Usually no signal. Don't claim anything about their account; retry when the connection is back.
+    show("appScreen"); S.loaded = false; if (S.biz) render(); else $("#view").innerHTML = `<div class="empty"><b>Can't reach BusyNes</b>Check your connection.</div>`;
     toast("Can't reach BusyNes. Check your connection.", {label:"Try again", run:() => enter(session)});
     window.addEventListener("online", () => enter(session), {once:true});
     return;
   }
-  if (!me.data){ $("#npEmail").textContent = S.user.email; show("notPartnerScreen"); return; }
-  S.me = me.data;
-  show("appScreen"); render();
-  await refresh();
+  if (!S.businesses.length){ showOnboarding(); return; }
+  const params = new URLSearchParams(location.search), want = params.get("biz") || store.get("busynes.biz");
+  await openBusiness((S.businesses.find(b => b.id === want) || S.businesses[0]).id, true);
   if (pushSupported() && Notification.permission === "granted") savePushSubscription(false).catch(() => {});
 }
 function authErr(msg){ $("#authErr").textContent = msg || ""; }
@@ -770,7 +1136,20 @@ $("#forgotBtn").onclick = () => once($("#forgotBtn"), async () => {
   const {error} = await S.sb.auth.resetPasswordForEmail(email, {redirectTo: location.origin + location.pathname});
   authErr(error ? error.message : "If that email has a BusyNes login, a reset link is on its way. Check your inbox.");
 });
-$("#npSignOut").onclick = () => S.sb.auth.signOut();
+$("#onboardForm").onsubmit = e => {
+  e.preventDefault();
+  once($("#obBtn"), async () => {
+    $("#obErr").textContent = "";
+    const name = $("#obBiz").value.trim(); if (!name) { $("#obErr").textContent = "Give your business a name."; return; }
+    try { await createBusiness(name, $("#obKind").value.trim(), $("#obName").value.trim()); }
+    catch(err){ $("#obErr").textContent = (err && err.message) || "That didn't work. Try again."; }
+  });
+};
+$("#obCheck").onclick = () => once($("#obCheck"), async () => {
+  try { await loadBusinesses(); } catch(e){ return failed(e); }
+  if (S.businesses.length) await openBusiness(S.businesses[0].id); else toast("Nothing yet. Ask the owner to invite " + ((S.user && S.user.email) || "your email") + ".");
+});
+$("#obSignOut").onclick = () => S.sb.auth.signOut();
 
 // ---------- start ----------
 (function start(){
@@ -791,14 +1170,18 @@ $("#npSignOut").onclick = () => S.sb.auth.signOut();
     lastUser = id;
     setTimeout(() => enter(session), 0);  // don't call Supabase inside the auth callback
   });
-  setInterval(() => { if (S.me && document.visibilityState === "visible" && !$("#overlay").innerHTML && !S.editing) refresh(true); }, POLL_MS);
-  document.addEventListener("visibilitychange", () => { if (S.me && document.visibilityState === "visible") refresh(true); });
+  setInterval(() => { if (S.biz && document.visibilityState === "visible" && !$("#overlay").innerHTML && !S.editing) refresh(true); }, POLL_MS);
+  document.addEventListener("visibilitychange", () => { if (S.biz && document.visibilityState === "visible") refresh(true); });
   const wanted = new URLSearchParams(location.search).get("tab");
   if (wanted && TABS.includes(wanted)) S.tab = wanted;
   if ("serviceWorker" in navigator && location.protocol !== "file:"){
     navigator.serviceWorker.register("sw.js").catch(() => {});
-    // Tapping a phone notification asks the open app to jump to the right tab.
-    navigator.serviceWorker.addEventListener("message", e => { if (e.data && e.data.type === "open-tab" && S.me) goTab(e.data.tab); });
+    // Tapping a phone notification asks the open app to jump to the right business and tab.
+    navigator.serviceWorker.addEventListener("message", async e => {
+      const d = e.data || {}; if (d.type !== "open-tab" || !S.user) return;
+      if (d.biz && (!S.biz || S.biz.id !== d.biz) && S.businesses.some(b => b.id === d.biz)){ S.tab = d.tab || S.tab; await openBusiness(d.biz); }
+      if (S.biz) goTab(d.tab);
+    });
   }
 })();
 })();

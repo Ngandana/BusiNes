@@ -1,6 +1,6 @@
 // Keeps the app's own files on the phone so it opens instantly.
 // Sales data always comes fresh from Supabase and is never cached here.
-const CACHE = "busynes-v3";
+const CACHE = "busynes-v7";
 const FILES = ["./", "index.html", "styles.css", "app.js", "config.js", "vendor/supabase.js", "manifest.webmanifest", "icons/icon-192.png", "icons/icon-512.png", "icons/icon.svg"];
 
 self.addEventListener("install", e => {
@@ -33,16 +33,16 @@ self.addEventListener("push", e => {
     icon: "icons/icon-192.png",
     badge: "icons/icon-192.png",
     tag: d.tag || undefined,
-    data: { tab: d.tab || "sell" },
+    data: { tab: d.tab || "sell", biz: d.biz || "" },
   }));
 });
 self.addEventListener("notificationclick", e => {
   e.notification.close();
-  const tab = (e.notification.data || {}).tab || "sell";
+  const data = e.notification.data || {}, tab = data.tab || "sell", biz = data.biz || "";
   e.waitUntil(clients.matchAll({ type: "window", includeUncontrolled: true }).then(list => {
     for (const c of list) {
-      if ("focus" in c) { c.postMessage({ type: "open-tab", tab }); return c.focus(); }
+      if ("focus" in c) { c.postMessage({ type: "open-tab", tab, biz }); return c.focus(); }
     }
-    return clients.openWindow("./?tab=" + tab);
+    return clients.openWindow("./?tab=" + tab + (biz ? "&biz=" + biz : ""));
   }));
 });
