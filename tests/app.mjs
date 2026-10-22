@@ -14,11 +14,19 @@ const iso = d => d.getFullYear() + "-" + String(d.getMonth()+1).padStart(2,"0") 
 const plus = n => { const d = new Date(); d.setDate(d.getDate()+n); return iso(d); };
 const now = new Date().toISOString();
 const P = new URLSearchParams(location.search);
+window.__failed = []; window.__auth = []; window.__ts = [];
+window.__down = P.get("netdown") === "1";
+const down = () => window.__down || !navigator.onLine;
+const netErr = () => ({data:null, error:{message:"TypeError: Failed to fetch"}});
+window.turnstile = {
+  render(el, o){ window.__ts.push(o); const n = window.__ts.length; if (P.get("notoken") !== "1") setTimeout(() => o.callback("tok-" + n), 0); return "w" + n; },
+  reset(id){ const o = window.__ts[Number(id.slice(1)) - 1]; if (o && P.get("notoken") !== "1") setTimeout(() => o.callback("tok-r" + id), 0); }
+};
 const ME = P.get("me") || "vusi";
 const ROLE = P.get("role") || ({sibabalo:"owner", vusi:"partner", dokotela:"partner"}[ME]);
-const B1 = {id:"b1", name:"BusyNes", kind:"Drinks", role:ROLE, member_id:ME, privacy:"private", owner_name:"Sibabalo", team_settle:true};
-const B2 = {id:"b2", name:"Fat Cook", kind:"Fast food", role:"owner", member_id:"m_fc", privacy:"shared", owner_name:"Thabo", team_settle:false};
-let BIZ = P.get("none") === "1" ? [] : [B1, B2];
+const B1 = {id:"b1", name:"BusyNes", kind:"Drinks", role:ROLE, member_id:ME, privacy:"private", owner_name:"Sibabalo", team_settle:true, currency:P.get("cur") || "R"};
+const B2 = {id:"b2", name:"Fat Cook", kind:"Fast food", role:"owner", member_id:"m_fc", privacy:"shared", owner_name:"Thabo", team_settle:false, currency:"$"};
+let BIZ = P.get("none") === "1" ? [] : P.get("nob2") === "1" ? [B1] : [B1, B2];
 
 const byBiz = (a, b) => biz => biz === "b1" ? a : b;
 const D = {
@@ -49,8 +57,25 @@ const G1 = [{owner:"beers",partner_id:"dokotela",share:0.5},{owner:"beers",partn
 const G2 = [{owner:"everyone",partner_id:"m_fc",share:1}];
 const M1 = [{id:"sibabalo",name:"Sibabalo",email:"sib@x.com",phone:null,role:"owner",status:"active"},{id:"vusi",name:"Vusi",email:"vusi@x.com",phone:null,role:"partner",status:"active"},{id:"dokotela",name:"Dokotela",email:"dok@x.com",phone:null,role:"partner",status:"invited"}];
 const M2 = [{id:"m_fc",name:"Thabo",email:"thabo@x.com",phone:null,role:"owner",status:"active"},{id:"m_n",name:"Nomsa",email:"nomsa@x.com",phone:null,role:"partner",status:"invited"}];
+const PROFIT = P.get("profit") || "good";
+const GOOD = {revenue:230,costed_revenue:120,cost:80,profit:40,missing_revenue:110,fees:10,
+  products:[{product_id:"heineken",name:"Heineken",qty:3,revenue:120,cost:80,profit:40,costed:true},{product_id:"nini-mimosa",name:"Nini Mimosa",qty:2,revenue:110,cost:null,profit:null,costed:false}]};
+const LOSS = {revenue:100,costed_revenue:100,cost:130,profit:-30,missing_revenue:0,fees:0,
+  products:[{product_id:"heineken",name:"Heineken",qty:3,revenue:100,cost:130,profit:-30,costed:true}]};
+const THIN = {revenue:100,costed_revenue:100,cost:95,profit:5,missing_revenue:0,fees:0,
+  products:[{product_id:"heineken",name:"Heineken",qty:3,revenue:100,cost:95,profit:5,costed:true}]};
+const NONE = {revenue:0,costed_revenue:0,cost:0,profit:0,missing_revenue:0,fees:0,products:[]};
 const R = {
   claim_memberships: 0,
+  export_data: a => ({business:{name:'BusyNes',kind:'Drinks',privacy:'private'}, exported_at:now, you:{name:'Vusi', role:ROLE},
+    people:[{name:'Sibabalo',role:'owner',status:'active',email:null}],
+    orders:[{at:now,customer:'Lindiwe',items:[{product_id:'heineken',name:'Heineken',qty:3}],note:'5pm',status:'open',loan:false,added_by:'Sibabalo',taken_by:null}],
+    products: ROLE === 'delivery' ? undefined : [{name:'Heineken',price:40,cost:(ROLE === 'staff' ? null : 30),group:'beers',hidden:false,tracks_stock:true,stock_on_hand:2}],
+    sales: ROLE === 'delivery' ? undefined : [
+      {at:now,sold_by:'Vusi',money_to:'Vusi',method:'cash',note:'=SUM(1,1), "quoted"',items:[{name:'Nini Mimosa',qty:2,price:35,owner:'x'}],total:70,paid:50,loan_fee:0,due_on:'2026-12-01'},
+      {at:now,sold_by:'Sibabalo',money_to:'Sibabalo',method:'transfer',note:'Block C',items:[{name:'Black Label',qty:3,price:null,owner:'beers'}],total:null,paid:null,loan_fee:null,due_on:null}]}),
+  product_costs: a => (a.p_biz !== "b1" || PROFIT === "none") ? [] : [{product_id:"heineken", cost:30}],
+  my_profit: a => a.p_biz !== "b1" ? NONE : ({good:GOOD, loss:LOSS, thin:THIN, none:NONE}[PROFIT]),
   my_businesses: () => BIZ,
   my_groups: a => a.p_biz !== "b1" ? G2 : G1,
   list_members: a => a.p_biz !== "b1" ? M2 : M1,
@@ -61,14 +86,16 @@ const R = {
   my_debts: a => a.p_biz !== "b1" ? [] : [
     {sale_id:7,at:now,customer:"Mpho",items:"1 × First Watch",total:330,paid:0,outstanding:330,due_on:plus(3),paid_to:"vusi",recorded_by:"vusi",loan_fee:50},
     {sale_id:5,at:now,customer:"Thando",items:"2 × Nini Mimosa",total:70,paid:50,outstanding:20,due_on:plus(-2),paid_to:"vusi",recorded_by:"vusi",loan_fee:0}],
-  create_business: a => { BIZ.push({id:"b3", name:a.p_name, kind:a.p_kind, role:"owner", member_id:"m_new", privacy:"shared", owner_name:a.p_my_name, team_settle:false}); return "b3"; },
+  create_business: a => { BIZ.push({id:"b3", name:a.p_name, kind:a.p_kind, role:"owner", member_id:"m_new", privacy:"shared", owner_name:a.p_my_name, team_settle:false, currency:a.p_currency || "R"}); return "b3"; },
+  record_sale: a => a.p_note === "REJECT" ? {__error:"You can't record sales in this business"} : 7,
   delete_business: a => { BIZ = BIZ.filter(b => b.id !== a.p_biz); return null; },
-  update_business: a => { const b = BIZ.find(x => x.id === a.p_biz); if (b) { if (a.p_name != null) b.name = a.p_name; if (a.p_kind != null) b.kind = a.p_kind; if (a.p_privacy != null) b.privacy = a.p_privacy; if (a.p_team_settle != null) b.team_settle = a.p_team_settle; } return null; },
+  update_business: a => { const b = BIZ.find(x => x.id === a.p_biz); if (b) { if (a.p_name != null) b.name = a.p_name; if (a.p_kind != null) b.kind = a.p_kind; if (a.p_privacy != null) b.privacy = a.p_privacy; if (a.p_team_settle != null) b.team_settle = a.p_team_settle; if (a.p_currency != null) b.currency = a.p_currency; } return null; },
 };
 function builder(table){
   let biz = "b1";
   const b = { select(){return b;}, order(){return b;}, limit(){return b;}, neq(){return b;}, is(){return b;}, eq(c, v){ if (c === "business_id") biz = v; return b;},
               then(res, rej){
+                if (down()) return Promise.resolve(netErr()).then(res, rej);
                 let d = D[table]; if (typeof d === "function") d = d(biz);
                 if (table === "notifications" && !biz) d = UNREAD;
                 return Promise.resolve({data: d || [], error: null}).then(res, rej);
@@ -76,8 +103,12 @@ function builder(table){
   return b;
 }
 window.supabase = { createClient(){ return {
-  auth: { onAuthStateChange(cb){ setTimeout(() => cb("SIGNED_IN", {user:{id:"u1",email:"vusi@example.com"}}), 0); return {data:{subscription:{}}}; },
-          signOut(){return Promise.resolve({});}, signInWithPassword(){return Promise.resolve({});}, updateUser(){return Promise.resolve({error:null});} },
+  auth: { onAuthStateChange(cb){ setTimeout(() => P.get("signedout") === "1" ? cb("SIGNED_OUT", null) : cb("SIGNED_IN", {user:{id:"u1",email:"vusi@example.com"}}), 0); return {data:{subscription:{}}}; },
+          signOut(o){ window.__auth.push(["signOut", o]); return Promise.resolve({}); },
+          signInWithPassword(a){ window.__auth.push(["signIn", a]); if (a && a.password === "wrong") return Promise.resolve({error:{message:"Invalid login credentials"}}); return Promise.resolve({data:{}, error:null}); },
+          signUp(a){ window.__auth.push(["signUp", a]); return Promise.resolve({data:{session:null}, error:null}); },
+          resetPasswordForEmail(e, o){ window.__auth.push(["reset", [e, o]]); return Promise.resolve({error:null}); },
+          updateUser(){return Promise.resolve({error:null});} },
   from(t){
     const b = builder(t);
     // "unread across businesses" is the one notifications query with no business filter
@@ -85,15 +116,19 @@ window.supabase = { createClient(){ return {
     return b;
   },
   rpc(name,args){
+    if (down()) { window.__failed.push([name,args]); return Promise.resolve(netErr()); }
     window.__calls.push([name,args]);
     let r = name in R ? R[name] : 1; if (typeof r === "function") r = r(args || {});
+    if (r && r.__error) return Promise.resolve({data:null, error:{message:r.__error}});
     return Promise.resolve({data: r, error: null});
   },
 }; } };
 `;
 
+let captchaFlag = false;
 const server = http.createServer((req, res) => {
   let p = decodeURIComponent(req.url.split("?")[0]); if (p === "/") p = "/index.html";
+  if (p === "/config.js" && captchaFlag) { res.setHeader("content-type", "application/javascript"); return res.end(fs.readFileSync(path.join(ROOT, "config.js"), "utf8") + '\nwindow.BUSYNES_CONFIG.TURNSTILE_SITE_KEY = "TESTKEY";'); }
   if (p === "/vendor/supabase.js") { res.setHeader("content-type", "application/javascript"); return res.end(STUB); }
   const f = path.join(ROOT, p);
   if (!fs.existsSync(f) || !f.startsWith(ROOT.replace(/\//g, path.sep))) { res.statusCode = 404; return res.end("nope"); }
@@ -107,13 +142,19 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
 
 const browser = await puppeteer.launch({ executablePath: process.env.CHROME_PATH || [ "C:/Program Files/Google/Chrome/Application/chrome.exe", "C:/Program Files (x86)/Google/Chrome/Application/chrome.exe", "/usr/bin/google-chrome", "/usr/bin/chromium", "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" ].find(p => fs.existsSync(p)), headless: "new", args: ["--no-sandbox"] });
 const errors = [];
-async function open(query, ready = "#view .grid, #view .empty, #view h2") {
+async function open(query, ready = "#view .grid, #view .empty, #view h2", keep = false) {
   const page = await browser.newPage();
   await page.setViewport({ width: 390, height: 844 });
   page.on("pageerror", e => errors.push(query + " pageerror: " + e.message));
   page.on("console", m => { if (m.type() === "error") errors.push(query + " console: " + m.text()); });
   page.on("dialog", d => d.dismiss());
-  await page.evaluateOnNewDocument(() => { try { localStorage.clear(); } catch (e) {} });
+  if (!keep) await page.evaluateOnNewDocument(() => { try { localStorage.clear(); } catch (e) {} });
+  await page.evaluateOnNewDocument(() => {
+    window.__downloads = []; window.__blobs = {};
+    const cu = URL.createObjectURL.bind(URL);
+    URL.createObjectURL = b => { const u = cu(b); window.__blobs[u] = b; return u; };
+    HTMLAnchorElement.prototype.click = function () { if (this.download) { window.__downloads.push({ name: this.download, href: this.href }); return; } return HTMLElement.prototype.click.call(this); };
+  });
   await page.goto("http://127.0.0.1:8791/index.html" + query, { waitUntil: "networkidle0" });
   await page.waitForSelector(ready, { timeout: 8000 });
   const api = {
@@ -124,6 +165,7 @@ async function open(query, ready = "#view .grid, #view .empty, #view h2") {
     tab: async t => { await page.click(`#tab-${t}`); await sleep(80); },
     visible: async sel => page.$eval(sel, el => !el.hidden && el.offsetParent !== null).catch(() => false),
     exists: async sel => !!(await page.$(sel)),
+    download: async () => { await sleep(150); return page.evaluate(async () => { const d = window.__downloads.pop(); if (!d) return null; const b = window.__blobs[d.href]; return { name: d.name, text: await b.text(), bytes: Array.from(new Uint8Array(await b.slice(0, 3).arrayBuffer())) }; }); },
     loaded: async () => { await page.waitForFunction(() => { const v = document.querySelector("#view"); return v && v.innerText && !v.innerText.includes("Loading"); }, { timeout: 5000 }); },
   };
   return api;
@@ -132,7 +174,7 @@ async function open(query, ready = "#view .grid, #view .empty, #view h2") {
 // ================================================================== 1. a partner in an existing business
 console.log("1. Partner (Vusi) in BusyNes: the original screens still work");
 let A = await open("");
-let { page, text, calls, tab } = A;
+let { page, text, calls, tab, exists } = A;
 ok(await text("#bizName") === "BusyNes", "the header shows which business you're in");
 ok((await text()).includes("Nini Mimosa") && (await text()).includes("Heineken"), "products shown");
 ok((await text()).includes("Dokotela & Vusi's") && (await text()).includes("Sibabalo's"), "product groups are shown with their owners (two groups)");
@@ -160,13 +202,37 @@ await tab("sales"); t = await text(); ok(/Owes R20/.test(t), "sales list flags t
   await page.click('[data-sfilter="all"]'); await sleep(60);
 }
 await tab("report"); t = await text(); ok(/your share collected/i.test(t), "money screen shows");
+await page.screenshot({ path: (process.env.TEMP || "/tmp") + "/ui-profit.png", fullPage: true });
 ok(/Sibabalo pays you or Dokotela/.test(t) && /R160/.test(t), "settle-up is one line: Sibabalo pays you or Dokotela, R160 (team settle-up is on for BusyNes)");
 ok(/settle as one/.test(t), "explains that partners who run the same stock settle as one");
+ok(/Your profit/i.test(t) && /Making money/.test(t) && /R40/.test(t) && /33(\.\d+)?% of what you sell is profit/.test(t), "the Money tab shows a profit card: 'Making money', R40, 33% margin");
+ok(/Loan fees earned/.test(t) && /\+R10/.test(t) && /Profit with fees/.test(t) && /R50/.test(t), "loan fees are shown on top (R10 more, R50 in total)");
+ok(/R110 of what you sold has no cost set yet/.test(t) && /Set costs/.test(t), "items with no cost are flagged, not guessed: 'R110 ... no cost set yet'");
+ok(/Heineken/.test(t) && /no cost/.test(t) && /By product/i.test(t), "profit is listed by product, with 'no cost' where it isn't known");
+ok((await calls()).filter(c => c[0] === "my_profit").every(c => c[1].p_biz === "b1"), "profit is requested for this business only");
 ok((await calls()).filter(c => c[0] === "my_money").every(c => c[1].p_biz === "b1"), "every request names the business (b1)");
 await page.click("#teamBtn"); await sleep(80); t = await text();
 ok(t.includes("Who has change?") && t.includes("Sibabalo") && /Owner/.test(t), "team shows chat and roles");
 ok(await page.$eval('a[href="tel:0821112222"]', e => e.textContent === "Call"), "Call link for Sibabalo uses tel:");
 ok(await page.$eval('a[href^="https://wa.me/27833334444"]', e => true).catch(() => false), "WhatsApp link converts 083… to 2783…");
+
+console.log("\n1b. Stock: what things cost");
+await tab("stock"); t = await text();
+ok(/costs R30/.test(t) && /R10 profit each/.test(t) && /cost not set/.test(t), "the product list shows cost and profit each (Heineken costs R30, makes R10), and 'cost not set' for the rest");
+await page.click('[data-edit="heineken"]'); await page.waitForSelector("#costIn");
+ok(await page.$eval("#costIn", e => e.value === "30") && await exists("#addCost"), "the edit panel has the cost field (R30) and a cost field for deliveries");
+await page.$eval("#costIn", el => { el.value = ""; }); await page.type("#costIn", "27.5"); await page.click('[data-docost="heineken"]'); await sleep(120);
+let uc = await A.last("update_product"); ok(uc && uc[1].p_id === "heineken" && uc[1].p_cost === 27.5, "saving a cost sends update_product with the cost");
+await page.click('[data-edit="heineken"]').catch(() => {}); await page.waitForSelector("#addQty");
+await page.type("#addQty", "12"); await page.type("#addCost", "26"); await page.click('[data-doadd="heineken"]'); await sleep(120);
+let sm = await A.last("add_stock_move"); ok(sm && sm[1].p_qty === 12 && sm[1].p_cost === 26 && sm[1].p_kind === "add", "a delivery can carry what it cost each (R26)");
+await page.click('[data-edit="heineken"]'); await page.waitForSelector("#countQty"); await page.type("#countQty", "5"); await page.click('[data-docount="heineken"]'); await sleep(120);
+sm = await A.last("add_stock_move"); ok(sm[1].p_kind === "count" && !("p_cost" in sm[1]), "a stock count never sends a cost");
+await page.click("[data-newprod]"); await page.waitForSelector("#npCost");
+await page.type("#npName", "Savanna"); await page.type("#npPrice", "40"); await page.type("#npCost", "28"); await page.click('[data-npowner="beers"]'); await page.click("#npSave"); await sleep(150);
+let np = await A.last("add_product"); ok(np && np[1].p_name === "Savanna" && np[1].p_cost === 28, "a new product can be added with its cost");
+await page.click("[data-newprod]"); await page.waitForSelector("#npCost"); await page.type("#npName", "Water"); await page.type("#npPrice", "10"); await page.click('[data-npowner="beers"]'); await page.click("#npSave"); await sleep(150);
+np = await A.last("add_product"); ok(!("p_cost" in np[1]), "...and the cost is optional");
 
 console.log("\n2. Credit and loan checkout");
 await tab("sell");
@@ -217,6 +283,27 @@ ok(await page.$eval("#tab-orders", e => e.getAttribute("aria-selected") === "tru
 await page.click("#teamBtn"); await sleep(80);
 await page.type("#chatInput", "On my way"); await page.keyboard.press("Enter"); await sleep(120);
 ok((await calls()).some(c => c[0] === "send_message" && c[1].p_biz === "b1" && c[1].p_body === "On my way"), "chat message sent to this business");
+
+// ================================================================== 3b. downloads
+console.log("\n3b. Download your data");
+await page.click("#meBtn"); await page.waitForSelector("#meSettings"); await page.click("#meSettings"); await sleep(250);
+ok(await A.exists('[data-export="sales"]') && await A.exists('[data-export="products"]') && await A.exists('[data-export="orders"]') && await A.exists('[data-export="backup"]'), "a partner is offered sales, products, orders and a full backup");
+await page.click('[data-export="sales"]'); let dl = await A.download();
+ok(dl && /^busynes-sales-\d{4}-\d\d-\d\d\.csv$/.test(dl.name), "the sales file is named after the business and the date: " + (dl && dl.name));
+ok(dl.bytes.join() === "239,187,191", "the file starts with a byte-order mark so Excel reads accents and symbols correctly");
+ok(dl.text.split("\r\n")[0] === "Sale no.,Date,Time,Sold by,Money went to,How paid,Customer or note,Item,Qty,Unit price,Line total,Sale total,Paid so far,Still owed,Loan fee,Due date", "the columns are plain and readable");
+ok(dl.text.includes('"\'=SUM(1,1), ""quoted"""'), "a note that starts with '=' can't run as a spreadsheet formula (it gets an apostrophe) and commas and quotes are escaped");
+const saleRows = dl.text.split("\r\n");
+ok(saleRows.length === 3 && saleRows[1].includes(",Nini Mimosa,2,35,70,70,50,20,,2026-12-01"), "every item is one row, with money worked out (2 × R35 = R70, R50 paid, R20 still owed): " + saleRows[1].slice(-60));
+ok(saleRows[2].includes(",Black Label,3,,,,,,,"), "money you may not see is left blank, not guessed");
+await page.click('[data-export="products"]'); dl = await A.download();
+ok(dl.text.split("\r\n")[0].includes("Cost") && dl.text.includes("Heineken,40,30,Beers,No,Yes,2"), "the products file includes cost and stock for a partner");
+await page.click('[data-export="orders"]'); dl = await A.download();
+ok(dl.text.includes("Lindiwe") && dl.text.includes("3 × Heineken"), "the orders file lists the order");
+await page.click('[data-export="backup"]'); dl = await A.download();
+ok(/^busynes-backup-\d{4}-\d\d-\d\d\.json$/.test(dl.name) && JSON.parse(dl.text).business.name === "BusyNes", "the backup is one JSON file");
+ok((await calls()).filter(c => c[0] === "export_data").every(c => c[1].p_biz === "b1"), "every download asks for this business only");
+await tab("sell").catch(() => {});
 
 // ================================================================== 4. switching business
 console.log("\n4. Switching between businesses");
@@ -281,13 +368,32 @@ ok((await B.text("#obEmail")).includes("vusi@example.com"), "...and which email 
 ok(await B.page.$eval("#obName", e => e.value === "Vusi"), "their name is pre-filled from their email");
 await B.page.click("#obCheck"); await sleep(120);
 ok(await B.visible("#onboardScreen") && /Nothing yet/.test(await B.text(".toast")), "'Check for invitations' says so when there are none");
-await B.page.type("#obBiz", "Spaza Plus"); await B.page.type("#obKind", "Airtime and snacks");
+await B.page.waitForSelector(".toast", { hidden: true }); await B.page.type("#obBiz", "Spaza Plus"); await B.page.type("#obKind", "Airtime and snacks");
 await B.page.click("#obBtn"); await B.page.waitForSelector("#appScreen:not([hidden])"); await B.loaded();
 const cb = await B.last("create_business");
 ok(cb[1].p_name === "Spaza Plus" && cb[1].p_kind === "Airtime and snacks" && cb[1].p_my_name === "Vusi", "create_business sent the names");
+ok(!("p_currency" in cb[1]), "the default currency (R) isn't sent");
 ok(await B.visible("#appScreen") && await B.text("#bizName") === "Spaza Plus", "they land in their new business");
 ok((await B.text()).includes("No products yet") && (await B.text()).includes("Stock tab"), "...with a hint to add products first");
 await B.page.close();
+
+// ================================================================== 6b. profit: losing, thin, nothing set
+console.log("\n6b. Profit in its other states");
+{
+  const L = await open("?profit=loss"); await L.tab("report"); const tl = await L.text();
+  await L.page.screenshot({ path: (process.env.TEMP || "/tmp") + "/ui-loss.png" });
+  ok(/Losing money/.test(tl) && /selling below cost/.test(tl) && /30/.test(tl), "a loss reads 'Losing money' and flags the product selling below cost");
+  ok(await L.page.$eval(".profit .big", e => e.classList.contains("bad")), "...and the number is red");
+  await L.page.close();
+  const Th = await open("?profit=thin"); await Th.tab("report");
+  ok(/Thin margin/.test(await Th.text()), "a profit of 5% reads 'Thin margin'");
+  await Th.page.close();
+  const N = await open("?profit=none"); await N.tab("report"); const tn = await N.text();
+  ok(/See if you're making money/.test(tn) && /Add what things cost/.test(tn) && !/Making money|Losing money/.test(tn), "with no costs set it invites you to add them, and doesn't pretend");
+  await N.page.click("[data-gostock]"); await sleep(120);
+  ok(await N.page.$eval("#tab-stock", e => e.getAttribute("aria-selected") === "true"), "...the button takes you to the Stock tab");
+  await N.page.close();
+}
 
 // ================================================================== 7. delivery person
 console.log("\n7. Delivery: sees orders only");
@@ -297,8 +403,12 @@ ok(navShown.join() === "orders", "only the Orders tab is shown: " + navShown.joi
 ok((await C.text()).includes("Lindiwe") && !(await C.exists("[data-neworder]")) && !(await C.exists("[data-fillorder]")) && !(await C.exists("[data-cancelorder]")), "they see orders but can't add, sell or cancel them");
 ok(await C.exists('[data-claim="1"]'), "...and can take one");
 const cc = (await C.calls()).map(c => c[0]);
-ok(!cc.includes("sales_timeline") && !cc.includes("stock_levels") && !cc.includes("my_debts") && !cc.includes("my_money"), "the app doesn't even ask for sales, stock or money: " + [...new Set(cc)].join(","));
+ok(!cc.includes("sales_timeline") && !cc.includes("stock_levels") && !cc.includes("my_debts") && !cc.includes("my_money") && !cc.includes("my_profit") && !cc.includes("product_costs"), "the app doesn't even ask for sales, stock or money: " + [...new Set(cc)].join(","));
 await C.page.click("#teamBtn"); await sleep(80); ok(/chat/i.test(await C.text()), "they can still chat and call");
+await C.page.click("#meBtn"); await C.page.click("#meSettings"); await sleep(250);
+ok(!(await C.exists('[data-export="sales"]')) && !(await C.exists('[data-export="products"]')) && await C.exists('[data-export="orders"]') && await C.exists('[data-export="backup"]'), "delivery can download orders and a backup, but not sales or products");
+await C.page.click('[data-export="backup"]'); const cd = await C.download();
+ok(cd && JSON.parse(cd.text).sales === undefined && JSON.parse(cd.text).products === undefined, "...and their backup has no sales or products in it");
 await C.page.close();
 
 // ================================================================== 8. staff
@@ -310,8 +420,17 @@ ok(!(await E.exists("[data-newprod]")), "no 'Add product' button");
 await E.page.click('[data-edit="heineken"]'); await sleep(60);
 ok(await E.exists("#addQty") && !(await E.exists("#priceIn")) && !(await E.exists("[data-dohide]")), "stock can be updated, but there's no price or hide control");
 await E.tab("report"); ok(!(await E.exists("[data-settle]")), "no 'Mark as settled'");
+ok(!/Your profit/i.test(await E.text()) && !(await E.exists(".profit")), "staff don't see a profit card");
+{
+  const ec = (await E.calls()).map(c => c[0]);
+  ok(!ec.includes("my_profit") && !ec.includes("product_costs"), "...and the app never even asks for profit or costs");
+  await E.tab("stock"); await E.page.click('[data-edit="heineken"]'); await sleep(60);
+  ok(!(await E.exists("#costIn")) && !(await E.exists("#addCost")) && !/costs R|cost not set/.test(await E.text()), "staff see no cost fields and no costs on the stock list");
+}
 await E.page.click("#meBtn"); await E.page.click("#meSettings"); await sleep(250);
 t = await E.text();
+await E.page.click('[data-export="products"]'); const ed2 = await E.download();
+ok(ed2 && !ed2.text.split("\r\n")[0].includes("Cost") && !ed2.text.includes(",30,"), "staff's products file has no cost column");
 ok(/Business settings/.test(t) && !(await E.exists("[data-invite]")) && !(await E.exists("[data-editbiz]")) && !/Who owns what/.test(t) && await E.exists("[data-leave]"), "settings are read-only: no invites, no ownership, but they can leave");
 await E.page.close();
 
@@ -330,6 +449,152 @@ const ng = await F2.last("set_group_shares");
 ok(ng[1].p_group === "wine" && ng[1].p_shares[0].partner_id === "sibabalo" && ng[1].p_shares[0].share === 1, "a new group starts owned 100% by the owner");
 await F2.tab("report"); ok(/You pay Dokotela & Vusi \(either one\)/.test(await F2.text()), "the owner's settle-up reads 'You pay Dokotela & Vusi (either one)'");
 await F2.page.close();
+
+// ================================================================== 10. currency
+console.log("\n10. Each business shows its own currency");
+{
+  const K = await open("?cur=KSh&me=sibabalo"); await K.loaded();
+  let tk = await K.text();
+  ok(/KSh 40/.test(tk) && !/R40/.test(tk), "amounts use the business's symbol, with a space after a long one: 'KSh 40'");
+  await K.page.click('[data-add="heineken"]'); await K.page.click("#cartNext"); await K.page.waitForSelector("#saveSale");
+  ok((await K.text("#saveSale")).includes("KSh 40") && /\(KSh\)/.test(await K.page.$eval(".sheet", e => e.textContent)), "the checkout uses it in totals and in labels like 'Loan fee (KSh)'");
+  await K.page.click("#sheetCancel");
+  await K.page.click("#meBtn"); await K.page.click("#meSettings"); await sleep(250);
+  await K.page.click("[data-editbiz]"); await K.page.waitForSelector("#ebCur");
+  ok(await K.page.$eval("#ebCur", e => e.value === "KSh"), "the owner can see and edit the currency in Edit business");
+  await K.page.$eval("#ebCur", e => { e.value = ""; }); await K.page.type("#ebCur", "$"); await K.page.click("#ebSave"); await sleep(250);
+  const ub = await K.last("update_business"); ok(ub && ub[1].p_currency === "$", "saving sends the new symbol");
+  await K.tab("sell").catch(() => {}); await K.page.click("#tab-sell"); await sleep(120);
+  ok(/\$40/.test(await K.text()) && !/KSh/.test(await K.text()), "everything switches to $ straight away");
+  await K.page.click("#bizBtn"); await K.page.waitForSelector("[data-openbiz]"); await K.page.click('[data-openbiz="b2"]'); await K.loaded();
+  await K.tab("report"); ok(/\$50/.test(await K.text()), "a different business has its own symbol ($ in Fat Cook)");
+  await K.page.close();
+  const N2 = await open("?none=1", "#obBiz");
+  await N2.page.$eval("#obCur", e => { e.value = ""; }); await N2.page.type("#obCur", "$"); await N2.page.type("#obBiz", "Dollar Shop"); await N2.page.click("#obBtn"); await N2.page.waitForSelector("#appScreen:not([hidden])");
+  ok((await N2.last("create_business"))[1].p_currency === "$", "a new business can be created with its own symbol");
+  await N2.page.close();
+}
+
+// ================================================================== 11. deleting your account
+console.log("\n11. Delete your account");
+{
+  const D1 = await open(""); await D1.loaded();
+  await D1.page.click("#meBtn"); await D1.page.waitForSelector("#meDelete"); await D1.page.click("#meDelete"); await D1.page.waitForSelector("#daGo");
+  let sh = await D1.text(".sheet");
+  ok(/You run Fat Cook/.test(sh) && /also deletes that business/.test(sh) && await D1.exists("#daOwned"), "someone who runs a business is told it will be deleted too, and has to tick a box");
+  ok(/Former member/.test(sh), "the sheet says what happens to the sales they made");
+  await D1.page.click("#daGo"); await sleep(80);
+  ok(/Type DELETE/.test(await D1.text("#daErr")), "nothing happens until DELETE is typed");
+  await D1.page.type("#daWord", "delete"); await D1.page.click("#daGo"); await sleep(80);
+  ok(/Tick the box/.test(await D1.text("#daErr")), "...nor until the business box is ticked");
+  await D1.page.click("#daOwned"); await D1.page.click("#daGo"); await sleep(80);
+  ok(/password/.test(await D1.text("#daErr")), "...nor without the password");
+  await D1.page.type("#daPass", "wrong"); await D1.page.click("#daGo"); await sleep(150);
+  ok(/isn't right/.test(await D1.text("#daErr")) && !(await D1.calls()).some(c => c[0] === "delete_account"), "a wrong password stops it, and nothing is deleted");
+  await D1.page.$eval("#daPass", e => { e.value = ""; }); await D1.page.type("#daPass", "correct horse"); await D1.page.click("#daGo"); await sleep(400);
+  const da = await D1.last("delete_account");
+  ok(da && da[1].p_delete_owned === true, "with everything confirmed it deletes, including the business they run");
+  ok((await D1.page.evaluate(() => window.__auth)).filter(a => a[0] === "signOut").some(a => a[1] && a[1].scope === "local"), "...and signs the phone out");
+  ok(await D1.visible("#authScreen") && /account was deleted/.test(await D1.text(".toast")), "they land on the sign-in screen with a confirmation");
+  ok((await D1.page.evaluate(() => Object.keys(localStorage).filter(k => k.startsWith("busynes.")).length)) === 0, "everything BusyNes saved on the phone is wiped");
+  await D1.page.close();
+  const D2 = await open("?nob2=1"); await D2.loaded();
+  await D2.page.click("#meBtn"); await D2.page.click("#meDelete"); await D2.page.waitForSelector("#daGo");
+  ok(!(await D2.exists("#daOwned")), "someone who runs nothing sees no business warning");
+  await D2.page.type("#daWord", "DELETE"); await D2.page.type("#daPass", "pw"); await D2.page.click("#daGo"); await sleep(300);
+  ok((await D2.last("delete_account"))[1].p_delete_owned === false, "...and nothing else is deleted");
+  await D2.page.close();
+}
+
+// ================================================================== 12. selling without signal
+console.log("\n12. Sales without signal");
+{
+  const O = await open(""); await O.loaded();
+  const tileText = async (o, id) => o.page.$eval(`[data-add="${id}"]`, e => e.innerText);
+  ok(/2 left/.test(await tileText(O, "heineken")), "(Heineken: 2 left)");
+  await O.page.evaluate(() => { window.__down = true; });                 // the signal drops while the app is open
+  await O.page.click('[data-add="heineken"]'); await O.page.click("#cartNext"); await O.page.waitForSelector("#saveSale");
+  await O.page.click("#saveSale"); await sleep(300);
+  ok(/Saved on this phone/.test(await O.text(".toast")), "with no signal the sale is kept on the phone, with a clear message");
+  ok(await O.exists("#queueNote") && /1 sale saved on this phone/.test(await O.text("#queueNote")), "a banner shows what is waiting to be sent");
+  ok(!(await O.calls()).some(c => c[0] === "record_sale"), "nothing reached the server yet");
+  ok(/1 left/.test(await tileText(O, "heineken")), "stock on the tile already counts it (1 left), so it isn't sold twice");
+  await O.page.evaluate(() => { window.__down = false; window.dispatchEvent(new Event("online")); }); await sleep(700);
+  const rs = await O.last("record_sale");
+  ok(rs && /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(rs[1].p_client_ref) && Math.abs(Date.now() - new Date(rs[1].p_at)) < 120000 && rs[1].p_items[0].qty === 1, "when the signal returns it is sent, with a unique reference and the time it was really made");
+  ok((await O.page.evaluate(() => localStorage.getItem("busynes.queue"))) === "[]" && !(await O.exists("#queueNote")), "...then the waiting list is empty and the banner is gone");
+  await O.page.close();
+
+  const O2 = await open(""); await O2.loaded();
+  await O2.page.setOfflineMode(true); await sleep(250);                  // a real offline event
+  ok(await O2.exists("#offlineNote") && /You're offline/.test(await O2.text()), "the offline event shows a banner straight away");
+  await O2.page.click('[data-add="heineken"]'); await O2.page.click("#cartNext"); await O2.page.waitForSelector("#saveSale"); await O2.page.click("#saveSale"); await sleep(250);
+  ok(/Saved on this phone/.test(await O2.text(".toast")) && (await O2.page.evaluate(() => window.__failed.filter(f => f[0] === "record_sale").length)) === 0, "known offline: it doesn't even try to send, it just keeps the sale");
+  await O2.page.setOfflineMode(false); await sleep(900);
+  ok(!!(await O2.last("record_sale")) && (await O2.page.evaluate(() => localStorage.getItem("busynes.queue"))) === "[]", "back online it is sent automatically");
+  await O2.page.close();
+
+  // the sale is sent but the server says no: the person is told, nothing is lost silently
+  const O3 = await open(""); await O3.loaded();
+  await O3.page.evaluate(() => { window.__down = true; });
+  await O3.page.click('[data-add="heineken"]'); await O3.page.click("#cartNext"); await O3.page.waitForSelector("#saveSale"); await O3.page.type("#saleNote", "REJECT"); await O3.page.click("#saveSale"); await sleep(250);
+  await O3.page.evaluate(() => { window.__down = false; window.dispatchEvent(new Event("online")); }); await sleep(700);
+  ok(/couldn't be recorded/.test(await O3.text()) && /can't record sales in this business/.test(await O3.text()) && await O3.exists("[data-discardq]"), "a saved sale the server refuses stays visible with the reason and a Discard button");
+  await O3.page.click("[data-discardq]"); await sleep(100);
+  ok(!(await O3.exists("[data-discardq]")) && (await O3.page.evaluate(() => localStorage.getItem("busynes.queue"))) === "[]", "...and discarding removes it");
+  await O3.page.close();
+
+  // opening the app with no signal at all
+  const S1 = await open("", undefined, true); await S1.loaded(); await S1.page.close();     // a normal visit saves what's needed
+  const S2 = await open("?netdown=1", undefined, true);
+  ok(await S2.visible("#appScreen") && await S2.text("#bizName") === "BusyNes", "opened with no signal, the app still opens the saved business");
+  ok(await S2.exists("#offlineNote") && await S2.exists('[data-add="heineken"]'), "...with the Sell screen and a note that it's offline");
+  await S2.page.click("#tab-orders"); await sleep(100);
+  ok(/needs a connection/.test(await S2.text()) && await S2.exists("[data-gosell]"), "the other screens say they need a connection and point back to Sell");
+  await S2.page.click("[data-gosell]"); await S2.page.click('[data-add="nini-mimosa"]'); await S2.page.click("#cartNext"); await S2.page.waitForSelector("#saveSale"); await S2.page.click("#saveSale"); await sleep(250);
+  ok(/1 sale saved on this phone/.test(await S2.text("#queueNote")), "a sale can be recorded from a cold start with no signal");
+  await S2.page.evaluate(() => { window.__down = false; window.dispatchEvent(new Event("online")); }); await sleep(900);
+  const rs2 = await S2.last("record_sale");
+  ok(rs2 && rs2[1].p_biz === "b1" && rs2[1].p_items[0].product_id === "nini-mimosa" && !(await S2.exists("#offlineNote")) && !(await S2.exists("#queueNote")), "when the signal comes back the app leaves offline mode and sends it");
+  ok((await S2.page.evaluate(() => window.__calls.map(c => c[0]))).includes("my_money"), "...and reloads everything");
+  // signing out with unsent sales warns first
+  await S2.page.evaluate(() => { window.__down = true; });
+  await S2.page.click('[data-add="nini-mimosa"]'); await S2.page.click("#cartNext"); await S2.page.waitForSelector("#saveSale"); await S2.page.click("#saveSale"); await sleep(250);
+  await S2.page.click("#meBtn"); await S2.page.waitForSelector("#signOut"); await S2.page.click("#signOut"); await S2.page.waitForSelector("#cfGo");
+  ok(/haven't been sent yet/.test(await S2.text(".sheet")), "signing out with unsent sales warns first, and says they stay on the phone");
+  await S2.page.close();
+}
+
+// ================================================================== 13. the human check at sign-up
+console.log("\n13. Sign-up check (CAPTCHA)");
+{
+  captchaFlag = true;
+  const C1 = await open("?signedout=1", "#authForm");
+  await C1.page.waitForFunction(() => window.__ts && window.__ts.length > 0, { timeout: 3000 }); await sleep(100);
+  ok(await C1.visible("#captchaBox") && (await C1.page.evaluate(() => window.__ts[0])).sitekey === "TESTKEY", "when a site key is configured the check appears on the sign-in form");
+  await C1.page.type("#authEmail", "a@b.com"); await C1.page.type("#authPass", "secret1");
+  await C1.page.click("#signInBtn"); await sleep(250);
+  let au = await C1.page.evaluate(() => window.__auth);
+  ok(au.some(a => a[0] === "signIn" && a[1].options && a[1].options.captchaToken === "tok-1"), "signing in sends the check's token");
+  await C1.page.click("#signUpBtn"); await sleep(250);
+  au = await C1.page.evaluate(() => window.__auth);
+  const su = au.find(a => a[0] === "signUp");
+  ok(su && su[1].options.captchaToken && su[1].options.captchaToken !== "tok-1" && su[1].options.emailRedirectTo, "each attempt needs a fresh token (the check resets), and sign-up still sends the redirect");
+  await C1.page.click("#forgotBtn"); await sleep(250);
+  au = await C1.page.evaluate(() => window.__auth);
+  ok(au.some(a => a[0] === "reset" && a[1][1].captchaToken), "'Forgot my password' sends it too");
+  await C1.page.close();
+  const C2 = await open("?signedout=1&notoken=1", "#authForm"); await sleep(300);
+  await C2.page.type("#authEmail", "a@b.com"); await C2.page.type("#authPass", "secret1"); await C2.page.click("#signInBtn"); await sleep(150);
+  ok(/complete the check/.test(await C2.text("#authErr")) && !(await C2.page.evaluate(() => window.__auth)).some(a => a[0] === "signIn"), "without a completed check, nothing is sent");
+  await C2.page.close();
+  captchaFlag = false;
+  const C3 = await open("?signedout=1", "#authForm"); await sleep(300);
+  await C3.page.type("#authEmail", "a@b.com"); await C3.page.type("#authPass", "secret1"); await C3.page.click("#signInBtn"); await sleep(200);
+  const a3 = (await C3.page.evaluate(() => window.__auth)).find(a => a[0] === "signIn");
+  ok(!(await C3.visible("#captchaBox")) && a3 && !(a3[1].options && a3[1].options.captchaToken), "with no site key configured (the default) there is no check and nothing changes");
+  await C3.page.close();
+}
 
 // ================================================================== done
 console.log("\nErrors during the whole run: " + errors.length);

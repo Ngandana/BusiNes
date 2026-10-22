@@ -82,4 +82,13 @@ T.ok((await h.as("sibabalo", `select * from busynes.list_members('${B}')`)).rows
 T.ok((await h.as("vusi", `select * from busynes.list_members('${B}')`)).rows.every(r => r.email === null), "partners don't");
 T.ok((await h.err("vusi", "select email from busynes.partners")) !== null && (await h.err("vusi", "select user_id from busynes.partners")) !== null, "email and login ids can't be read from the partners table");
 
+T.section("6. Profit works on the old sales once a cost is set");
+const pr0 = (await h.as("sibabalo", `select busynes.my_profit('${B}') p`)).rows[0].p;
+T.ok(T.near(pr0.profit, 0) && T.near(pr0.costed_revenue, 0) && Number(pr0.missing_revenue) > 0 && T.near(pr0.revenue, pr0.missing_revenue), "before any cost is set, all old sales are 'missing a cost' and nothing is invented");
+T.ok((await h.err("sibabalo", "select cost from busynes.products")) !== null, "costs can't be read straight from the products table");
+await h.as("sibabalo", `select busynes.update_product('gordons', null, null, null, null, 200)`);
+const pr1 = (await h.as("sibabalo", `select busynes.my_profit('${B}') p`)).rows[0].p;
+const gin = pr1.products.find(p => p.name === "Gordon's Gin");
+T.ok(gin && gin.qty === 2 && T.near(gin.revenue, 560) && T.near(gin.cost, 400) && T.near(gin.profit, 160), "setting Gordon's cost to R200 fills in both earlier gin sales: 2 sold for R560, cost R400, profit R160");
+
 process.exit(T.done());

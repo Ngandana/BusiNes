@@ -5,7 +5,7 @@
 (() => {
 "use strict";
 
-const VERSION = "3.0";
+const VERSION = "3.3";
 const LOW = 3;               // "running low" threshold
 const POLL_MS = 20000;       // refresh while the app is open
 const OWNER_COLORS = ["var(--beer)", "var(--sib)", "var(--bottle)", "var(--warn)"]; // given to owner groups in order
@@ -15,8 +15,8 @@ const S = {
   sb: null, user: null, me: null,
   biz: null, businesses: [], unreadBy: {}, members: null,
   partners: [], shares: [], products: [], stock: {}, moves: [], sales: [], settlements: [], money: null,
-  orders: [], debts: [], notifs: [], messages: [], seenNotif: null, fromOrder: null, salesFilter: "all", orderFees: {},
-  tab: "sell", cart: {}, period: "settle", editing: null, confirmDel: null, loaded: false,
+  orders: [], debts: [], notifs: [], messages: [], seenNotif: null, fromOrder: null, salesFilter: "all", orderFees: {}, costs: {}, profit: null,
+  tab: "sell", cart: {}, period: "settle", editing: null, confirmDel: null, loaded: false, offline: false,
 };
 const store = {
   get(k){ try { return localStorage.getItem(k); } catch(e){ return null; } },
@@ -44,8 +44,12 @@ const ROLE_HELP = {
 const $ = s => document.querySelector(s);
 const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
 const num = v => Number(v) || 0;
-const money = n => "R" + Math.round(num(n)).toLocaleString("en-ZA").replace(/ /g," ");
-const money2 = n => { const r = Math.round(num(n)*100)/100; return Number.isInteger(r) ? money(r) : "R" + r.toFixed(2); };
+// Each business has its own currency symbol (R, $, €, KSh...). A longer symbol gets a space after it.
+const cur = () => (S.biz && S.biz.currency) || "R";
+const sym = () => { const c = cur(); return c + (c.length > 1 ? " " : ""); };
+const money = n => sym() + Math.round(num(n)).toLocaleString("en-ZA").replace(/ /g," ");
+const money2 = n => { const r = Math.round(num(n)*100)/100; return Number.isInteger(r) ? money(r) : sym() + r.toFixed(2); };
+const CUR_LIST = `<datalist id="curList"><option value="R"><option value="$"><option value="€"><option value="£"><option value="₦"><option value="KSh"><option value="N$"><option value="P"></datalist>`;
 const dayKey = d => { d = new Date(d); return d.getFullYear()+"-"+String(d.getMonth()+1).padStart(2,"0")+"-"+String(d.getDate()).padStart(2,"0"); };
 const dayLabel = iso => {
   const k = dayKey(iso);
@@ -60,6 +64,7 @@ const productById = id => S.products.find(p => p.id === id);
 const slug = s => s.toLowerCase().replace(/[^a-z0-9]+/g,"-").replace(/^-|-$/g,"").slice(0,40) || ("g" + Date.now().toString(36));
 const niceGroup = id => String(id).replace(/[-_]+/g," ").replace(/\b\w/g, c => c.toUpperCase());
 const pct = f => (Math.round(num(f) * 10000) / 100) + "%";
+const pct1 = f => (Math.round(num(f) * 1000) / 10) + "%";
 const appLink = () => location.origin + location.pathname.replace(/[^/]*$/, "");
 
 // Owner groups ("everyone", "beers") come from the ownership table. Each group is owned by one or more people.
@@ -131,6 +136,86 @@ async function once(btn, fn){
 }
 const soft = async (q, fallback) => { try { const r = await q; return r.error ? fallback : r.data; } catch(e){ return fallback; } };
 
+// ---------- offline: sales saved on the phone and sent when there's signal ----------
+const QKEY = "busynes.queue";
+const queue = {
+  all(){ try { return JSON.parse(store.get(QKEY) || "[]"); } catch(e){ return []; } },
+  save(list){ store.set(QKEY, JSON.stringify(list)); },
+  mine(){ return S.biz ? queue.all().filter(q => q.biz === bid()) : []; },
+};
+const newRef = () => (window.crypto && crypto.randomUUID) ? crypto.randomUUID()
+  : "xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx".replace(/[xy]/g, c => { const r = Math.random() * 16 | 0; return (c === "x" ? r : (r & 3 | 8)).toString(16); });
+const isNetworkError = e => !navigator.onLine || /failed to fetch|networkerror|network request failed|load failed|fetch failed|timeout/i.test(String((e && e.message) || e || ""));
+// Send a sale. If the database hasn't been updated yet it doesn't know the two newer fields, so send it the older way.
+async function callRecordSale(args){
+  try { return await must(S.sb.rpc("record_sale", args)); }
+  catch(e){
+    if (/could not find the function|schema cache/i.test((e && e.message) || "")){
+      const old = Object.assign({}, args); delete old.p_client_ref; delete old.p_at;
+      return await must(S.sb.rpc("record_sale", old));
+    }
+    throw e;
+  }
+}
+function queueSale(args, lines, total, paidTo){
+  const all = queue.all();
+  all.push({ref: args.p_client_ref, biz: args.p_biz, args, lines: lines.map(l => ({name: l.name, qty: l.qty})), total, paidTo, queuedAt: args.p_at, error: null});
+  queue.save(all);
+}
+let flushing = false;
+async function flushQueue(){
+  if (flushing || !S.sb || !S.user || !navigator.onLine) return 0;
+  flushing = true; let sent = 0;
+  try {
+    for (const item of queue.all()){
+      if (item.error) continue;
+      try { await callRecordSale(item.args); queue.save(queue.all().filter(q => q.ref !== item.ref)); sent++; }
+      catch(e){
+        const msg = (e && e.message) || "";
+        if (isNetworkError(e) || /jwt|token|not authenticated|sign in first/i.test(msg)) break;     // try again later
+        const all = queue.all(), it = all.find(q => q.ref === item.ref);
+        if (it){ it.error = msg || "It couldn't be recorded."; queue.save(all); }
+      }
+    }
+  } finally { flushing = false; }
+  if (sent) toast(sent === 1 ? "1 saved sale was sent." : sent + " saved sales were sent.");
+  return sent;
+}
+const pendingQty = id => queue.mine().filter(q => !q.error).reduce((a, q) => a + (q.args.p_items || []).filter(i => i.product_id === id).reduce((b, i) => b + i.qty, 0), 0);
+function offlineBanner(){
+  const q = queue.mine(), pending = q.filter(x => !x.error), failedQ = q.filter(x => x.error);
+  let h = "";
+  if (S.offline || !navigator.onLine) h += `<p class="banner" id="offlineNote">📴 You're offline. Sales you record are kept on this phone and sent automatically when you're back online.</p>`;
+  if (pending.length) h += `<div class="banner" id="queueNote">🕓 <b>${pending.length} sale${pending.length === 1 ? "" : "s"} saved on this phone</b>, waiting to be sent.
+    <div class="sub">${pending.map(x => x.lines.map(l => l.qty + " × " + esc(l.name)).join(", ") + " · " + timeLabel(x.queuedAt)).join("<br>")}</div>
+    <button class="linkbtn" type="button" data-syncnow>Send now</button></div>`;
+  failedQ.forEach(x => { h += `<div class="banner bad">A saved sale couldn't be recorded (${x.lines.map(l => l.qty + " × " + esc(l.name)).join(", ")}): ${esc(x.error)} <button class="linkbtn" type="button" data-discardq="${esc(x.ref)}">Discard it</button></div>`; });
+  return h;
+}
+const offlineNeeds = () => `<div class="empty"><b>This needs a connection</b>You can still record sales. Everything else comes back when you're online.<br><br><button class="btn" type="button" data-gosell>Go to Sell</button></div>`;
+// What this phone needs to open the Sell screen without signal.
+function saveSnapshot(){
+  if (!S.biz || !canSell()) return;
+  try { store.set("busynes.snap." + bid(), JSON.stringify({biz: S.biz, partners: S.partners, shares: S.shares, products: S.products, stock: S.stock, at: Date.now()})); } catch(e){}
+}
+function startOffline(user){
+  const id = store.get("busynes.biz"); let snap = null;
+  try { snap = id && JSON.parse(store.get("busynes.snap." + id) || "null"); } catch(e){}
+  if (!snap || !snap.biz || !user) return false;
+  S.user = user; S.businesses = [snap.biz]; S.biz = snap.biz; S.me = snap.biz.member_id;
+  Object.assign(S, {partners: snap.partners || [], shares: snap.shares || [], products: snap.products || [], stock: snap.stock || {},
+    orders: [], debts: [], sales: [], notifs: [], messages: [], money: null, profit: null, costs: {}, cart: {}, loaded: true, offline: true});
+  S.tab = "sell"; draft = freshDraft(); show("appScreen"); render();
+  return true;
+}
+// Forget what this phone has saved about the business (on sign-out). Sales not sent yet are kept unless everything is wiped.
+function wipeLocal(everything){
+  try {
+    Object.keys(localStorage).filter(k => k.startsWith("busynes.") && (everything || k !== QKEY)).forEach(k => localStorage.removeItem(k));
+  } catch(e){}
+}
+
+const PRODUCT_COLS = "id,business_id,name,price,owner,sort,hidden,track_stock";
 async function loadAll(){
   const sb = S.sb, b = bid(), full = canSell();
   const [partners, shares, orders, notifs, messages, fees, unread] = await Promise.all([
@@ -145,7 +230,7 @@ async function loadAll(){
   let products = [], stock = [], moves = [], sales = [], settlements = [], debts = [];
   if (full){
     [products, stock, moves, sales, settlements, debts] = await Promise.all([
-      must(sb.from("products").select("*").eq("business_id", b).order("sort").order("name")),
+      must(sb.from("products").select(PRODUCT_COLS).eq("business_id", b).order("sort").order("name")),
       must(sb.rpc("stock_levels", {p_biz: b})),
       must(sb.from("stock_moves").select("*").eq("business_id", b).order("at",{ascending:false}).limit(8)),
       must(sb.rpc("sales_timeline", {p_biz: b, p_limit: 300})),
@@ -158,7 +243,14 @@ async function loadAll(){
   S.stock = {}; for (const r of stock) S.stock[r.product_id] = r.qty;
   S.unreadBy = {}; for (const u of unread) S.unreadBy[u.business_id] = (S.unreadBy[u.business_id] || 0) + 1;
   S.money = isDelivery() ? null : await must(sb.rpc("my_money", {p_biz: b, p_from: periodStart()}));
+  S.costs = {}; S.profit = null;
+  if (canManage()){
+    const [costs, profit] = await Promise.all([soft(sb.rpc("product_costs", {p_biz: b}), []), soft(sb.rpc("my_profit", {p_biz: b, p_from: periodStart()}), null)]);
+    for (const c of costs) S.costs[c.product_id] = num(c.cost);
+    S.profit = profit;
+  }
   S.loaded = true;
+  saveSnapshot();
   announceNew();
 }
 // Pop up a toast when something new arrives while the app is open.
@@ -172,6 +264,15 @@ function announceNew(){
 }
 async function refresh(quiet){
   if (!S.biz) return;
+  if (S.offline){
+    try {
+      await loadBusinesses();
+      const cur2 = S.businesses.find(x => x.id === S.biz.id);
+      if (!cur2){ S.offline = false; await reloadBusinesses(); return; }
+      S.biz = cur2; S.me = cur2.member_id; S.offline = false;
+    } catch(e){ return; }
+  }
+  if (navigator.onLine && queue.all().some(q => !q.error)) await flushQueue();
   const mine = bid();
   try { await loadAll(); if (S.biz && bid() === mine) render(); }
   catch(e){
@@ -200,7 +301,7 @@ async function openBusiness(id, keepTab){
   const b = S.businesses.find(x => x.id === id); if (!b) return;
   S.biz = b; S.me = b.member_id; store.set("busynes.biz", id);
   Object.assign(S, {partners:[], shares:[], products:[], stock:{}, moves:[], sales:[], settlements:[], money:null, orders:[], debts:[], notifs:[],
-    messages:[], seenNotif:null, fromOrder:null, orderFees:{}, cart:{}, loaded:false, editing:null, confirmDel:null, members:null, salesFilter:"all", period:"settle"});
+    messages:[], seenNotif:null, fromOrder:null, orderFees:{}, costs:{}, profit:null, cart:{}, loaded:false, editing:null, confirmDel:null, members:null, salesFilter:"all", period:"settle"});
   draft = freshDraft();
   // Switching business lands on a normal start screen; opening the app again keeps where you were.
   if (!NAV().includes(S.tab) && !(keepTab && (S.tab === "team" || S.tab === "settings"))) S.tab = NAV()[0];
@@ -213,8 +314,10 @@ function showOnboarding(){
   const nm = $("#obName"); if (!nm.value) nm.value = ((S.user && S.user.email) || "").split("@")[0].replace(/[._-]+/g," ").replace(/\b\w/g, c => c.toUpperCase()).slice(0, 40);
   show("onboardScreen");
 }
-async function createBusiness(name, kind, myName){
-  const id = await must(S.sb.rpc("create_business", {p_name: name, p_kind: kind, p_my_name: myName}));
+async function createBusiness(name, kind, myName, currency){
+  const args = {p_name: name, p_kind: kind, p_my_name: myName};
+  if (currency && currency !== "R") args.p_currency = currency;
+  const id = await must(S.sb.rpc("create_business", args));
   await loadBusinesses();
   await openBusiness(id);
   toast("Your business is ready. Add what you sell on the Stock tab.");
@@ -233,6 +336,7 @@ function render(){
   $(".tabs .inner").style.gridTemplateColumns = `repeat(${nav.length}, 1fr)`;
   let html;
   if (!S.loaded) html = `<div class="empty"><b>Loading…</b>Fetching your business.</div>`;
+  else if (S.offline && S.tab !== "sell") html = offlineNeeds();
   else if (S.tab === "sell") html = viewSell();
   else if (S.tab === "orders") html = viewOrders();
   else if (S.tab === "owed") html = viewOwed();
@@ -255,14 +359,14 @@ function render(){
 function viewSell(){
   if (!S.products.length) return `<div class="empty"><b>No products yet</b>${canManage() ? "Add what you sell and its price on the Stock tab, then come back here to sell." : "The owner hasn't added any products yet."}</div>`;
   const os = owners(), single = Object.keys(os).length === 1;
-  let h = "";
+  let h = offlineBanner();
   for (const o of Object.values(os)){
     const ps = S.products.filter(p => p.owner === o.id && !p.hidden);
     if (!ps.length) continue;
     h += `<section>${single ? "" : `<div class="owner-head"><span class="owner-tag"><i style="background:${o.color}"></i>${esc(o.name)}'s</span><span class="eyebrow">Tap to add</span></div>`}<div class="grid">`;
     for (const p of ps){
       const q = S.cart[p.id] || 0, tracked = p.track_stock !== false;
-      const st = tracked ? (S.stock[p.id] || 0) - q : null;
+      const st = tracked ? (S.stock[p.id] || 0) - q - pendingQty(p.id) : null;
       const cls = !tracked ? "" : st <= 0 ? "out" : st <= LOW ? "low" : "";
       h += `<div style="position:relative;min-width:0">
         <button class="tile ${q ? "in" : ""}" type="button" data-add="${esc(p.id)}" aria-label="Add one ${esc(p.name)}">
@@ -311,8 +415,8 @@ function checkout(){
       <div class="line total"><span>Total</span><span>${money(total)}</span></div></div>
     <div class="field"><span class="lab">How is it being paid?</span>
       <div class="chips" role="group"><button type="button" class="chip" data-mode="full">Paid in full</button><button type="button" class="chip" data-mode="part">Paid part</button><button type="button" class="chip" data-mode="credit">On credit</button><button type="button" class="chip" data-mode="loan">Loan with a fee</button></div></div>
-    <div class="field" id="partBox" hidden><label for="paidNow">Paid now (R)</label><input id="paidNow" class="text num" type="number" inputmode="decimal" min="0" max="${total}" step="1" value="${esc(draft.paid)}"></div>
-    <div class="field" id="feeBox" hidden><label for="feeAmt">Loan fee (R)</label><input id="feeAmt" class="text num" type="number" inputmode="decimal" min="0" step="1" placeholder="e.g. 50" value="${esc(draft.fee)}">
+    <div class="field" id="partBox" hidden><label for="paidNow">Paid now (${cur()})</label><input id="paidNow" class="text num" type="number" inputmode="decimal" min="0" max="${total}" step="1" value="${esc(draft.paid)}"></div>
+    <div class="field" id="feeBox" hidden><label for="feeAmt">Loan fee (${cur()})</label><input id="feeAmt" class="text num" type="number" inputmode="decimal" min="0" step="1" placeholder="e.g. 50" value="${esc(draft.fee)}">
       <span class="muted" style="font-size:13px">What you charge for lending. It's added to what they owe and it's yours, not the owners' of the items. Other people can't see it.</span></div>
     <div class="field" id="feeToBox" hidden><span class="lab">Who keeps the fee?</span>
       <div class="chips" role="group">${S.partners.map(p => `<button type="button" class="chip" data-feeto="${esc(p.id)}" aria-pressed="${draft.feeTo===p.id}">${esc(p.id === S.me ? "Me" : p.name)}</button>`).join("")}</div></div>
@@ -359,20 +463,27 @@ function checkout(){
     if (owed > 0.005 && !draft.note.trim()) return toast("Type the customer's name so you know who owes.");
     e.target.disabled = true;
     const sale = {at:new Date().toISOString(), items:lines, total, paidTo:draft.paidTo, method:draft.method, note:draft.note.trim(), due: owed > 0.005 && draft.due ? draft.due : null};
+    const args = {
+      p_biz: bid(),
+      p_items: lines.map(l => ({product_id:l.product_id, qty:l.qty})),
+      p_paid_to: sale.paidTo, p_method: sale.method, p_note: sale.note,
+      p_paid: paid, p_due: sale.due, p_order: S.fromOrder || null,
+      p_fee: fee, p_fee_to: fee > 0 ? (draft.feeTo || S.me) : null,
+      p_client_ref: newRef(), p_at: sale.at,          // so a retry can't double-record it, and it keeps the time it happened
+    };
+    const finish = () => { S.cart = {}; S.fromOrder = null; draft = freshDraft(); closeSheet(); };
+    const keepOnPhone = () => { queueSale(args, lines, total, sale.paidTo); finish(); toast("Saved on this phone. It will be sent when you're back online."); render(); };
+    if (!navigator.onLine){ keepOnPhone(); return; }
     try {
-      await must(S.sb.rpc("record_sale", {
-        p_biz: bid(),
-        p_items: lines.map(l => ({product_id:l.product_id, qty:l.qty})),
-        p_paid_to: sale.paidTo, p_method: sale.method, p_note: sale.note,
-        p_paid: paid, p_due: sale.due, p_order: S.fromOrder || null,
-        p_fee: fee, p_fee_to: fee > 0 ? (draft.feeTo || S.me) : null,
-      }));
-      S.cart = {}; S.fromOrder = null; draft = freshDraft();
-      closeSheet();
+      await callRecordSale(args);
+      finish();
       toast(fee > 0 ? `Loan saved. ${sale.note} owes ${money2(owed)}.` : owed > 0.005 ? `Saved. ${sale.note} owes ${money2(owed)}.` : "Saved " + money(total) + " paid to " + pname(sale.paidTo) + ".",
             {label:"Copy for group", run:() => copyText(saleText(sale), "Copied. Paste it in your group.")});
       await refresh();
-    } catch(err){ e.target.disabled = false; failed(err); }
+    } catch(err){
+      if (isNetworkError(err)){ keepOnPhone(); return; }
+      e.target.disabled = false; failed(err);
+    }
   };
 }
 // The text you paste in a WhatsApp group: what was sold and where the money went. No amounts owed, no fees.
@@ -421,7 +532,7 @@ function paySheet(id){
   const d = S.debts.find(x => x.sale_id === id); if (!d) return;
   let method = "cash", to = S.me;
   openSheet(`<div class="grab"></div><h2>${esc(d.customer || "Customer")} owes ${money2(d.outstanding)}</h2>
-    <div class="field"><label for="payAmt">Amount received now (R)</label><div class="stepper"><input id="payAmt" class="text num" type="number" inputmode="decimal" min="0" max="${num(d.outstanding)}" step="1" value="${num(d.outstanding)}" style="width:100%"></div></div>
+    <div class="field"><label for="payAmt">Amount received now (${cur()})</label><div class="stepper"><input id="payAmt" class="text num" type="number" inputmode="decimal" min="0" max="${num(d.outstanding)}" step="1" value="${num(d.outstanding)}" style="width:100%"></div></div>
     <div class="field"><span class="lab">How did they pay?</span><div class="chips"><button type="button" class="chip" data-pm="cash" aria-pressed="true">Cash</button><button type="button" class="chip" data-pm="transfer" aria-pressed="false">Into an account</button></div></div>
     <div class="field"><span class="lab">Who received it?</span><div class="chips">${S.partners.map(p => `<button type="button" class="chip" data-pto="${esc(p.id)}" aria-pressed="${p.id === to}">${esc(p.id === S.me ? "Me" : p.name)}</button>`).join("")}</div></div>
     <div class="row"><button class="btn ghost" type="button" id="sheetCancel">Back</button><span class="spacer"></span><button class="btn" type="button" id="savePay">Save payment</button></div>`);
@@ -483,7 +594,7 @@ function newOrderSheet(){
   openSheet(`<div class="grab"></div><h2>Add an order</h2>
     <div class="field"><label for="ordCust">Customer</label><input id="ordCust" class="text" maxlength="60" placeholder="e.g. Lindiwe"></div>
     <div class="field"><span class="lab">What kind of order?</span><div class="chips" role="group"><button type="button" class="chip" data-otype="normal" aria-pressed="true">Normal order</button><button type="button" class="chip" data-otype="loan" aria-pressed="false">Loan</button></div></div>
-    <div class="field" id="ordFeeBox" hidden><label for="ordFee">Loan fee (R)</label><input id="ordFee" class="text num" type="number" inputmode="decimal" min="0" step="1" placeholder="e.g. 50">
+    <div class="field" id="ordFeeBox" hidden><label for="ordFee">Loan fee (${cur()})</label><input id="ordFee" class="text num" type="number" inputmode="decimal" min="0" step="1" placeholder="e.g. 50">
       <span class="muted" style="font-size:13px">Whatever you plan to charge for lending. Only you can see this amount.</span></div>
     <div class="field"><span class="lab">What do they want?</span><div class="list card" style="padding-block:0">${os.map(o => prods.filter(p => p.owner === o.id).map(p =>
       `<div class="item" style="padding:8px 0"><div class="main"><div class="title">${esc(p.name)}</div><div class="sub num">${money(p.price)}</div></div>
@@ -628,15 +739,17 @@ function viewStock(){
         h += `<div class="item" style="flex-direction:column;align-items:stretch;gap:12px">
           <div class="title">${esc(p.name)} <span class="muted">${tracked ? "· " + n + " in stock" : "· stock not tracked"}</span></div>
           ${tracked ? `<div class="row"><div class="field" style="flex:1;min-width:120px"><label for="addQty">Delivery: add</label><div class="stepper"><input id="addQty" class="text num" type="number" inputmode="numeric" min="1" step="1" placeholder="0"><button class="btn small" type="button" data-doadd="${esc(p.id)}">Add</button></div></div>
-          <div class="field" style="flex:1;min-width:120px"><label for="countQty">Stock count: set to</label><div class="stepper"><input id="countQty" class="text num" type="number" inputmode="numeric" min="0" step="1" placeholder="${Math.max(n,0)}"><button class="btn small ghost" type="button" data-docount="${esc(p.id)}">Set</button></div></div></div>` : ""}
+          <div class="field" style="flex:1;min-width:120px"><label for="countQty">Stock count: set to</label><div class="stepper"><input id="countQty" class="text num" type="number" inputmode="numeric" min="0" step="1" placeholder="${Math.max(n,0)}"><button class="btn small ghost" type="button" data-docount="${esc(p.id)}">Set</button></div></div></div>
+          ${canManage() ? `<div class="field"><label for="addCost">What this delivery cost you, each (optional, R)</label><input id="addCost" class="text num" type="number" inputmode="decimal" min="0" step="0.01" placeholder="${S.costs[p.id] != null ? S.costs[p.id] : "e.g. 25"}"><span class="muted" style="font-size:13px">Used to work out your profit from now on.</span></div>` : ""}` : ""}
           ${canManage() ? `<div class="field"><label for="nameIn">Name</label><div class="stepper"><input id="nameIn" class="text" maxlength="40" value="${esc(p.name)}" style="width:100%"><button class="btn small ghost" type="button" data-doname="${esc(p.id)}">Save</button></div></div>
-          <div class="row"><div class="field" style="flex:1;min-width:120px"><label for="priceIn">Price (R)</label><div class="stepper"><input id="priceIn" class="text num" type="number" inputmode="decimal" min="0" step="1" value="${num(p.price)}"><button class="btn small ghost" type="button" data-doprice="${esc(p.id)}">Save</button></div></div>
+          <div class="field"><label for="costIn">What it costs you, each (${cur()})</label><div class="stepper"><input id="costIn" class="text num" type="number" inputmode="decimal" min="0" step="0.01" placeholder="e.g. 25" value="${S.costs[p.id] != null ? S.costs[p.id] : ""}"><button class="btn small ghost" type="button" data-docost="${esc(p.id)}">Save</button></div></div>
+          <div class="row"><div class="field" style="flex:1;min-width:120px"><label for="priceIn">Price (${cur()})</label><div class="stepper"><input id="priceIn" class="text num" type="number" inputmode="decimal" min="0" step="1" value="${num(p.price)}"><button class="btn small ghost" type="button" data-doprice="${esc(p.id)}">Save</button></div></div>
           <div class="field" style="flex:1;min-width:120px"><span class="lab">On the Sell screen</span><button class="btn small ghost" type="button" data-dohide="${esc(p.id)}">${p.hidden ? "Show it again" : "Hide it"}</button></div></div>
           <div class="field"><span class="lab">Count how many are left?</span><button class="btn small ghost" type="button" data-dotrack="${esc(p.id)}">${tracked ? "Stop tracking stock" : "Start tracking stock"}</button></div>` : ""}
           <div class="row end"><button class="btn small ghost" type="button" data-editdone>Close</button></div>
         </div>`;
       } else {
-        h += `<div class="item"><div class="main"><div class="title">${esc(p.name)}${p.hidden ? ` <span class="pill">hidden</span>` : ""}</div><div class="sub num">${money(p.price)} each${!tracked ? " · stock not tracked" : n <= 0 ? " · restock needed" : n <= LOW ? " · running low" : ""}</div></div>
+        h += `<div class="item"><div class="main"><div class="title">${esc(p.name)}${p.hidden ? ` <span class="pill">hidden</span>` : ""}</div><div class="sub num">${money(p.price)} each${canManage() ? (S.costs[p.id] != null ? ` · costs ${money2(S.costs[p.id])} · ${money2(num(p.price) - S.costs[p.id])} profit each` : " · cost not set") : ""}${!tracked ? " · stock not tracked" : n <= 0 ? " · restock needed" : n <= LOW ? " · running low" : ""}</div></div>
           ${tracked ? `<div class="stockn num ${cls}">${n}</div>` : ""}<button class="btn small ghost" type="button" data-edit="${esc(p.id)}" aria-label="Update ${esc(p.name)}">Update</button></div>`;
       }
     }
@@ -655,7 +768,9 @@ function newProductSheet(){
   const os = Object.values(owners()), multi = os.length > 1;
   openSheet(`<div class="grab"></div><h2>Add a product</h2>
     <div class="field"><label for="npName">Name</label><input id="npName" class="text" maxlength="40" placeholder="e.g. Cheese burger"></div>
-    <div class="field"><label for="npPrice">Selling price (R)</label><input id="npPrice" class="text num" type="number" inputmode="decimal" min="0" step="1"></div>
+    <div class="field"><label for="npPrice">Selling price (${cur()})</label><input id="npPrice" class="text num" type="number" inputmode="decimal" min="0" step="1"></div>
+    <div class="field"><label for="npCost">What it costs you (${cur()}, optional)</label><input id="npCost" class="text num" type="number" inputmode="decimal" min="0" step="0.01" placeholder="e.g. 25">
+      <span class="muted" style="font-size:13px">So BusyNes can work out your profit. You can add it later.</span></div>
     ${multi ? `<div class="field"><span class="lab">Whose stock is it?</span><div class="chips">${os.map((o,i) => `<button type="button" class="chip" data-npowner="${esc(o.id)}" aria-pressed="${i===0}">${esc(o.name)}</button>`).join("")}</div></div>` : ""}
     <div class="field"><span class="lab">Count how many are left?</span><div class="chips"><button type="button" class="chip" data-nptrack="yes" aria-pressed="true">Yes, track stock</button><button type="button" class="chip" data-nptrack="no" aria-pressed="false">No (made to order)</button></div></div>
     <div class="row"><button class="btn ghost" type="button" id="sheetCancel">Cancel</button><span class="spacer"></span><button class="btn" type="button" id="npSave">Add product</button></div>`);
@@ -667,7 +782,8 @@ function newProductSheet(){
     const name = $("#npName").value.trim(), price = parseFloat($("#npPrice").value);
     if (!name || !(price >= 0)) { toast("Give it a name and a price."); return; }
     e.target.disabled = true;
-    try { await must(S.sb.rpc("add_product", {p_biz: bid(), p_name: name, p_price: price, p_group: owner, p_track: track})); closeSheet(); toast(name + " added."); await refresh(); }
+    try { const cost = parseFloat($("#npCost").value);
+      await must(S.sb.rpc("add_product", Object.assign({p_biz: bid(), p_name: name, p_price: price, p_group: owner, p_track: track}, cost >= 0 ? {p_cost: cost} : {}))); closeSheet(); toast(name + " added."); await refresh(); }
     catch(err){ e.target.disabled = false; failed(err); }
   };
 }
@@ -678,6 +794,7 @@ function viewSales(){
   const list = S.salesFilter === "mine" ? S.sales.filter(mine) : S.sales;
   let h = `<h2>Sales</h2><p class="muted" style="margin:-12px 0 0">Everything that's been sold, newest first: what, when, who sold it and where the money went. Amounts only show for your own products and for sales you handled${S.biz.privacy === "shared" && canManage() ? ", plus everything else if you're an owner or partner" : ""}.</p>
     <div class="chips" role="group">${[["all","Everyone's"],["mine","Mine"]].map(([k,l]) => `<button type="button" class="chip" data-sfilter="${k}" aria-pressed="${S.salesFilter===k}">${l}</button>`).join("")}</div>`;
+  h += offlineBanner();
   if (!list.length) return h + `<div class="empty"><b>No sales to show yet</b>${S.salesFilter === "mine" ? "Sales you recorded or were paid for will show here." : "Sales recorded by anyone in the business will show here."}</div>`;
   let cur = "";
   for (const s of list){
@@ -711,6 +828,7 @@ function viewReport(){
   h += `<div class="kpis">
     <div class="kpi"><span class="eyebrow">Money you received</span><b class="num">${money2(received)}</b><span class="muted num">${money(cash)} cash · ${money(received - cash)} account</span></div>
     <div class="kpi"><span class="eyebrow">Your share collected</span><b class="num">${money2(due)}</b><span class="muted num">${money(m.sold_value != null ? m.sold_value : due)} of your stock sold${num(m.fees) > 0.005 ? " · " + money2(m.fees) + " loan fees" : ""}</span></div></div>`;
+  h += profitCard();
   if (num(m.outstanding) > 0.005) h += `<section class="card statement">Customers still owe <b class="num">${money2(m.outstanding)}</b> on your products and loan fees. It counts here once they pay.</section>`;
   h += `<section class="card statement">${diff > 0 ? `You're holding <b class="num">${money2(diff)}</b> that belongs to the others.`
        : diff < 0 ? `The others are holding <b class="num">${money2(-diff)}</b> of your money.`
@@ -731,6 +849,39 @@ function viewReport(){
   }
   return h;
 }
+// Profit: what you sold (your share) minus what it cost you. Owners and partners only.
+function profitCard(){
+  if (!canManage() || !S.profit) return "";
+  const p = S.profit, costed = num(p.costed_revenue), cost = num(p.cost), profit = num(p.profit), missing = num(p.missing_revenue), fees = num(p.fees);
+  const prods = p.products || [], anyCost = Object.keys(S.costs).length > 0;
+  let h = `<section class="card profit"><div class="row"><span class="eyebrow">Your profit</span><span class="spacer"></span>`;
+  if (!anyCost && costed <= 0){
+    return h + `</div><p style="margin:8px 0 12px"><b>See if you're making money.</b> Tell BusyNes what each item costs you and it will work out your profit and show which items earn the most.</p>
+      <button class="btn small" type="button" data-gostock>Add what things cost</button></section>`;
+  }
+  const margin = costed > 0 ? profit / costed : null;
+  const verdict = costed <= 0 ? null : profit < -0.005 ? {cls:"bad", text:"Losing money"} : margin < 0.10 ? {cls:"warn", text:"Thin margin"} : {cls:"good", text:"Making money"};
+  if (verdict) h += `<span class="pill ${verdict.cls}">${verdict.text}</span>`;
+  h += `</div>`;
+  if (costed > 0){
+    h += `<div class="big num ${verdict.cls}">${money2(profit)}</div>
+      <p class="muted" style="margin:2px 0 0">From ${money2(costed)} of sales, minus ${money2(cost)} it cost you. <b>${pct1(margin)}</b> of what you sell is profit.</p>`;
+    if (fees > 0.005) h += `<div class="row" style="margin-top:10px"><span>Loan fees earned</span><span class="spacer"></span><b class="num">+${money2(fees)}</b></div>
+      <div class="row"><span>Profit with fees</span><span class="spacer"></span><b class="num">${money2(profit + fees)}</b></div>`;
+  } else {
+    h += `<p class="muted" style="margin:8px 0 0">Nothing with a cost set was sold in this period.</p>`;
+  }
+  if (missing > 0.005) h += `<p class="banner" style="margin:12px 0 0">${money2(missing)} of what you sold has no cost set yet, so it's left out. <button class="linkbtn" type="button" data-gostock>Set costs</button></p>`;
+  if (prods.length){
+    h += `<div class="eyebrow" style="margin:16px 0 4px">By product</div><div class="list">` + prods.map(r => {
+      const has = r.costed, pr = num(r.profit), loss = has && pr < -0.005;
+      return `<div class="item"><div class="main"><div class="title">${esc(r.name)}</div><div class="sub num">${r.qty} sold · ${money2(r.revenue)}${loss ? " · selling below cost" : ""}</div></div>
+        <div class="num ${loss ? "bad-text" : ""}" style="font-weight:700">${has ? money2(pr) : `<span class="muted" style="font-weight:500">no cost</span>`}</div></div>`;
+    }).join("") + `</div>`;
+  }
+  return h + `<p class="muted" style="margin:12px 0 0;font-size:13px">Profit is on what you sold in this period, whether or not the customer has paid yet, and only your share of it.</p></section>`;
+}
+
 // Settle-up lines. Partners who co-own stock can count as one team, so a line can be to/from more than one person.
 const payFromMe = p => (p.from_ids || [p.from]).includes(S.me);
 function payText(p){
@@ -756,6 +907,56 @@ function settleSheet(){
     try { await must(S.sb.rpc("mark_settled", {p_biz: bid()})); closeSheet(); S.period = "settle"; toast("Settled. Starting fresh."); await refresh(); }
     catch(err){ e.target.disabled = false; failed(err); }
   };
+}
+
+// ---------- your data: download a copy ----------
+// A cell that starts with = + - or @ could run as a formula when opened in a spreadsheet, so text like that gets a
+// leading apostrophe. Numbers are written as they are.
+const csvCell = v => {
+  if (v == null) return "";
+  if (typeof v === "number") return String(v);
+  let t = String(v);
+  if (/^[=+\-@\t\r]/.test(t)) t = "'" + t;
+  return /[",\r\n]/.test(t) ? '"' + t.replace(/"/g, '""') + '"' : t;
+};
+const toCsv = (head, rows) => "﻿" + [head, ...rows].map(r => r.map(csvCell).join(",")).join("\r\n");
+const round2 = n => Math.round(n * 100) / 100;
+function salesCsv(d){
+  const rows = [], sales = d.sales || [];
+  sales.forEach((s, i) => (s.items || []).forEach(it => rows.push([
+    sales.length - i, dayKey(s.at), timeLabel(s.at), s.sold_by, s.money_to, s.method === "cash" ? "Cash" : "Account", s.note,
+    it.name, it.qty, it.price, it.price != null ? round2(it.price * it.qty) : null,
+    s.total, s.paid, s.total != null && s.paid != null ? round2(s.total - s.paid) : null, s.loan_fee || null, s.due_on])));
+  return toCsv(["Sale no.","Date","Time","Sold by","Money went to","How paid","Customer or note","Item","Qty","Unit price","Line total","Sale total","Paid so far","Still owed","Loan fee","Due date"], rows);
+}
+function productsCsv(d){
+  const mgr = d.you && (d.you.role === "owner" || d.you.role === "partner");
+  const head = ["Product","Price"].concat(mgr ? ["Cost"] : [], ["Group","Hidden","Counts stock","In stock now"]);
+  return toCsv(head, (d.products || []).map(p => [p.name, p.price].concat(mgr ? [p.cost] : [], [niceGroup(p.group), p.hidden ? "Yes" : "No", p.tracks_stock ? "Yes" : "No", p.stock_on_hand])));
+}
+function ordersCsv(d){
+  return toCsv(["Date","Time","Customer","Items","Note","Status","Loan","Added by","Taken by"],
+    (d.orders || []).map(o => [dayKey(o.at), timeLabel(o.at), o.customer, (o.items || []).map(i => i.qty + " × " + i.name).join("; "), o.note, o.status, o.loan ? "Yes" : "No", o.added_by, o.taken_by]));
+}
+// On a phone this opens the share sheet (save to Files, email, WhatsApp); elsewhere it downloads the file.
+async function saveFile(name, text, type){
+  const file = typeof File === "function" ? new File([text], name, {type}) : null;
+  if (file && navigator.canShare && /android|iphone|ipad/i.test(navigator.userAgent) && navigator.canShare({files: [file]})){
+    try { await navigator.share({files: [file], title: name}); return; }
+    catch(e){ if (e && e.name === "AbortError") return; }
+  }
+  const url = URL.createObjectURL(new Blob([text], {type}));
+  const a = document.createElement("a"); a.href = url; a.download = name; document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 4000);
+}
+async function exportData(kind){
+  const d = await must(S.sb.rpc("export_data", {p_biz: bid()}));
+  const base = slug(S.biz.name) + "-" + kind + "-" + dayKey(new Date());
+  if (kind === "sales") await saveFile(base + ".csv", salesCsv(d), "text/csv");
+  else if (kind === "products") await saveFile(base + ".csv", productsCsv(d), "text/csv");
+  else if (kind === "orders") await saveFile(base + ".csv", ordersCsv(d), "text/csv");
+  else await saveFile(slug(S.biz.name) + "-backup-" + dayKey(new Date()) + ".json", JSON.stringify(d, null, 2), "application/json");
+  toast("Your file is ready.");
 }
 
 // ---------- business settings: people, ownership, privacy ----------
@@ -806,6 +1007,9 @@ function viewSettings(){
       ${groupIds().map(groupCard).join("")}</section>`;
   }
 
+  h += `<section class="card"><div class="eyebrow">Your data</div>
+    <p style="margin:6px 0 10px">Download a copy of what you can see in this business. Handy as a backup, or to open in Excel. These files contain business information, so keep them somewhere safe.</p>
+    <div class="chips">${canSell() ? `<button class="btn small ghost" type="button" data-export="sales">Sales</button><button class="btn small ghost" type="button" data-export="products">Products and stock</button>` : ""}<button class="btn small ghost" type="button" data-export="orders">Orders</button><button class="btn small" type="button" data-export="backup">Everything (backup file)</button></div></section>`;
   h += `<section class="card"><div class="eyebrow">Privacy</div>
     <p style="margin:6px 0 10px">Only you and the people you invite can see this business. Other businesses on BusyNes can't see it, and there is no admin screen for anyone to browse it. <a href="privacy.html">Read how it works</a></p>
     <div class="row"><span class="muted">BusyNes v${VERSION}</span></div></section>`;
@@ -842,11 +1046,12 @@ function newBizSheet(){
     <div class="field"><label for="nbName">Business name</label><input id="nbName" class="text" maxlength="60" placeholder="e.g. Fat Cook"></div>
     <div class="field"><label for="nbKind">What do you sell? (optional)</label><input id="nbKind" class="text" maxlength="40" placeholder="e.g. Fast food"></div>
     <div class="field"><label for="nbMe">Your name in it</label><input id="nbMe" class="text" maxlength="40" value="${esc(mine)}"></div>
+    <div class="field"><label for="nbCur">Currency symbol</label><input id="nbCur" class="text" maxlength="4" list="curList" value="${esc(cur())}" autocomplete="off">${CUR_LIST}</div>
     <div class="row"><button class="btn ghost" type="button" id="sheetCancel">Cancel</button><span class="spacer"></span><button class="btn" type="button" id="nbSave">Create business</button></div>`);
   $("#sheetCancel").onclick = closeSheet;
   $("#nbSave").onclick = e => once(e.target, async () => {
     const name = $("#nbName").value.trim(); if (!name) return toast("Give the business a name.");
-    try { await createBusiness(name, $("#nbKind").value.trim(), $("#nbMe").value.trim()); } catch(err){ failed(err); }
+    try { await createBusiness(name, $("#nbKind").value.trim(), $("#nbMe").value.trim(), $("#nbCur").value.trim()); } catch(err){ failed(err); }
   });
 }
 function inviteSheet(){
@@ -895,11 +1100,15 @@ function editBizSheet(){
   openSheet(`<div class="grab"></div><h2>Edit business</h2>
     <div class="field"><label for="ebName">Business name</label><input id="ebName" class="text" maxlength="60" value="${esc(S.biz.name)}"></div>
     <div class="field"><label for="ebKind">What do you sell?</label><input id="ebKind" class="text" maxlength="40" value="${esc(S.biz.kind || "")}"></div>
+    <div class="field"><label for="ebCur">Currency symbol</label><input id="ebCur" class="text" maxlength="4" list="curList" value="${esc(cur())}" autocomplete="off">${CUR_LIST}
+      <span class="muted" style="font-size:13px">Shown next to every amount, like R, $ or €.</span></div>
     <div class="row"><button class="btn ghost" type="button" id="sheetCancel">Cancel</button><span class="spacer"></span><button class="btn" type="button" id="ebSave">Save</button></div>`);
   $("#sheetCancel").onclick = closeSheet;
   $("#ebSave").onclick = e => once(e.target, async () => {
     const name = $("#ebName").value.trim(); if (!name) return toast("The business needs a name.");
-    try { await setBusiness({p_name: name, p_kind: $("#ebKind").value.trim()}); closeSheet(); toast("Saved."); render(); } catch(err){ failed(err); }
+    const patch = {p_name: name, p_kind: $("#ebKind").value.trim()}, c = $("#ebCur").value.trim();
+    if (c && c !== cur()) patch.p_currency = c;
+    try { await setBusiness(patch); closeSheet(); toast("Saved."); render(); } catch(err){ failed(err); }
   });
 }
 function confirmSheet(title, text, label, run, danger = true){
@@ -936,13 +1145,18 @@ function bindView(){
   v.querySelectorAll("[data-edit]").forEach(b => b.onclick = () => { S.editing = b.dataset.edit; render(); });
   v.querySelectorAll("[data-editdone]").forEach(b => b.onclick = () => { S.editing = null; render(); });
   v.querySelectorAll("[data-newprod]").forEach(b => b.onclick = newProductSheet);
-  v.querySelectorAll("[data-doadd]").forEach(b => b.onclick = () => once(b, () => stockMove(b.dataset.doadd, "add", $("#addQty").value)));
+  v.querySelectorAll("[data-doadd]").forEach(b => b.onclick = () => once(b, () => stockMove(b.dataset.doadd, "add", $("#addQty").value, $("#addCost") ? $("#addCost").value : "")));
   v.querySelectorAll("[data-docount]").forEach(b => b.onclick = () => once(b, () => stockMove(b.dataset.docount, "count", $("#countQty").value)));
   const updateProduct = async (id, patch, msg) => { try { await must(S.sb.rpc("update_product", Object.assign({p_id: id}, patch))); if (msg) toast(msg); await refresh(); } catch(err){ failed(err); } };
   v.querySelectorAll("[data-doprice]").forEach(b => b.onclick = () => once(b, async () => {
     const price = parseFloat($("#priceIn").value); if (!(price >= 0)) return toast("Enter a price.");
     await updateProduct(b.dataset.doprice, {p_price: price}, "Price saved.");
   }));
+  v.querySelectorAll("[data-docost]").forEach(b => b.onclick = () => once(b, async () => {
+    const cost = parseFloat($("#costIn").value); if (!(cost >= 0)) return toast("Enter what it costs you.");
+    await updateProduct(b.dataset.docost, {p_cost: cost}, "Cost saved.");
+  }));
+  v.querySelectorAll("[data-gostock]").forEach(b => b.onclick = () => goTab("stock"));
   v.querySelectorAll("[data-doname]").forEach(b => b.onclick = () => once(b, async () => {
     const name = $("#nameIn").value.trim(); if (!name) return toast("Give it a name.");
     await updateProduct(b.dataset.doname, {p_name: name}, "Name saved.");
@@ -998,6 +1212,10 @@ function bindView(){
   v.querySelectorAll("[data-teamsettle]").forEach(b => b.onclick = () => once(b, async () => {
     try { await setBusiness({p_team_settle: b.dataset.teamsettle === "true"}); toast("Saved."); await refresh(true); render(); } catch(err){ failed(err); }
   }));
+  v.querySelectorAll("[data-syncnow]").forEach(b => b.onclick = () => once(b, async () => { if (!navigator.onLine) return toast("Still no signal."); const n = await flushQueue(); await refresh(); if (!n) toast("Nothing was sent yet."); }));
+  v.querySelectorAll("[data-discardq]").forEach(b => b.onclick = () => { queue.save(queue.all().filter(q => q.ref !== b.dataset.discardq)); render(); });
+  v.querySelectorAll("[data-gosell]").forEach(b => b.onclick = () => goTab("sell"));
+  v.querySelectorAll("[data-export]").forEach(b => b.onclick = () => once(b, async () => { try { await exportData(b.dataset.export); } catch(err){ failed(err); } }));
   v.querySelectorAll("[data-invite]").forEach(b => b.onclick = inviteSheet);
   v.querySelectorAll("[data-setrole]").forEach(sel => sel.onchange = async () => {
     try { await must(S.sb.rpc("update_member", {p_biz: bid(), p_member: sel.dataset.setrole, p_role: sel.value})); toast("Role changed."); await Promise.all([loadMembers(), refresh(true)]); render(); }
@@ -1035,11 +1253,12 @@ function bindView(){
   v.querySelectorAll("[data-leave]").forEach(b => b.onclick = () => confirmSheet("Leave this business?", "You'll lose access straight away. Your past sales stay in its records.", "Leave",
     async () => { await must(S.sb.rpc("leave_business", {p_biz: bid()})); await afterLeaving("You left " + S.biz.name + "."); }));
 }
-async function stockMove(pid, kind, raw){
+async function stockMove(pid, kind, raw, rawCost){
   const qty = parseInt(raw, 10);
   if (!(qty >= (kind === "add" ? 1 : 0))) return toast(kind === "add" ? "Enter how many came in." : "Enter how many are left.");
   try {
-    await must(S.sb.rpc("add_stock_move", {p_biz: bid(), p_product: pid, p_kind: kind, p_qty: qty}));
+    const cost = kind === "add" ? parseFloat(rawCost) : NaN;
+    await must(S.sb.rpc("add_stock_move", Object.assign({p_biz: bid(), p_product: pid, p_kind: kind, p_qty: qty}, cost >= 0 ? {p_cost: cost} : {})));
     S.editing = null; toast(kind === "add" ? "Added " + qty + "." : "Stock set to " + qty + ".");
     await refresh();
   } catch(err){ failed(err); }
@@ -1068,15 +1287,55 @@ $("#meBtn").onclick = () => {
     ${install}
     <div class="row"><button class="btn ghost" type="button" id="meBiz">Switch business</button><span class="spacer"></span><button class="btn ghost" type="button" id="meSettings">Business settings</button></div>
     <div class="row"><button class="btn ghost" type="button" id="changePass">Change password</button><span class="spacer"></span><button class="btn danger" type="button" id="signOut">Sign out</button></div>
+    <div class="row"><button class="linkbtn bad" type="button" id="meDelete">Delete my account</button></div>
     <div class="row"><button class="btn ghost" type="button" id="sheetCancel">Close</button><span class="spacer"></span><span class="muted">BusyNes v${VERSION}</span></div>`);
   $("#sheetCancel").onclick = closeSheet;
+  $("#meDelete").onclick = deleteAccountSheet;
   $("#meBiz").onclick = bizSheet;
   $("#meSettings").onclick = () => { closeSheet(); goTab("settings"); };
   $("#changePass").onclick = passwordSheet;
-  $("#signOut").onclick = async () => { closeSheet(); await S.sb.auth.signOut(); };
+  $("#signOut").onclick = signOutFlow;
   const ib = $("#installBtn");
   if (ib) ib.onclick = async () => { const ev = installEvent; installEvent = null; closeSheet(); if (ev){ ev.prompt(); await ev.userChoice; } };
 };
+
+function signOutFlow(){
+  const pending = queue.all().filter(q => !q.error).length;
+  const go = async () => { closeSheet(); wipeLocal(false); await S.sb.auth.signOut(); };
+  if (pending) return confirmSheet("Sign out?", `${pending} sale${pending === 1 ? "" : "s"} saved on this phone haven't been sent yet. They stay on this phone and are sent the next time you sign in with signal.`, "Sign out anyway", go, false);
+  go();
+}
+function deleteAccountSheet(){
+  const owned = S.businesses.filter(b => b.role === "owner"), one = owned.length === 1;
+  let token = null;
+  openSheet(`<div class="grab"></div><h2>Delete your account?</h2>
+    <p>This deletes your login for good. You'll be removed from every business you're in, and your name, email and phone number are wiped from their records. Sales you made stay in those businesses' books, shown as "Former member".</p>
+    ${owned.length ? `<div class="banner bad"><p style="margin:0 0 8px">You run ${owned.map(b => `<b>${esc(b.name)}</b>`).join(", ")}. Deleting your account <b>also deletes ${one ? "that business" : "those businesses"}</b> and everything in ${one ? "it" : "them"}, for everyone in ${one ? "it" : "them"}.</p>
+      <label style="display:flex;gap:8px;align-items:flex-start"><input type="checkbox" id="daOwned" style="margin-top:3px"> <span>I understand. Delete ${one ? "it" : "them"} too.</span></label></div>` : ""}
+    <div class="field"><label for="daPass">Your password</label><input id="daPass" class="text" type="password" autocomplete="current-password"></div>
+    <div id="daCaptcha" hidden></div>
+    <div class="field"><label for="daWord">Type DELETE to confirm</label><input id="daWord" class="text" autocomplete="off"></div>
+    <div class="err" id="daErr" role="alert" style="color:var(--bad);font-weight:600;min-height:1.4em"></div>
+    <div class="row"><button class="btn ghost" type="button" id="sheetCancel">Keep my account</button><span class="spacer"></span><button class="btn danger" type="button" id="daGo">Delete my account</button></div>`);
+  $("#sheetCancel").onclick = closeSheet;
+  mountCaptcha("#daCaptcha", t => { token = t; });
+  $("#daGo").onclick = e => once(e.target, async () => {
+    const err = m => { $("#daErr").textContent = m; };
+    err("");
+    if ($("#daWord").value.trim().toUpperCase() !== "DELETE") return err("Type DELETE to confirm.");
+    if (owned.length && !$("#daOwned").checked) return err("Tick the box to confirm you understand.");
+    const password = $("#daPass").value; if (!password) return err("Type your password so we know it's you.");
+    if (captchaOn() && !token) return err("Please complete the check first.");
+    // Prove it's really them before anything is deleted.
+    const {error} = await S.sb.auth.signInWithPassword({email: S.user.email, password, options: captchaOn() ? {captchaToken: token} : undefined});
+    if (error){ resetCaptcha("#daCaptcha", t => { token = t; }); return err(/invalid/i.test(error.message) ? "That password isn't right." : error.message); }
+    try { await must(S.sb.rpc("delete_account", {p_delete_owned: owned.length > 0})); }
+    catch(e2){ return err((e2 && e2.message) || "That didn't work. Try again."); }
+    try { await S.sb.auth.signOut({scope: "local"}); } catch(e3){}
+    wipeLocal(true); S.biz = null; S.businesses = []; S.user = null; S.loaded = false;
+    closeSheet(); show("authScreen"); toast("Your account was deleted.");
+  });
+}
 
 // Set a new password: used by "Change password" and by the link in a reset email.
 function passwordSheet(){
@@ -1097,10 +1356,12 @@ function passwordSheet(){
 // ---------- sign in ----------
 async function enter(session){
   S.user = session ? session.user : null;
-  if (!S.user){ S.loaded = false; S.biz = null; S.businesses = []; show("authScreen"); return; }
+  if (!S.user){ S.loaded = false; S.biz = null; S.businesses = []; show("authScreen"); ensureAuthCaptcha(); return; }
   try { await loadBusinesses(); }
   catch(e){
-    // Usually no signal. Don't claim anything about their account; retry when the connection is back.
+    // No signal. If this phone has the business saved, open it so sales can still be recorded.
+    if (isNetworkError(e) && startOffline(S.user)){ toast("You're offline. You can still record sales."); return; }
+    // Otherwise don't claim anything about their account; retry when the connection is back.
     show("appScreen"); S.loaded = false; if (S.biz) render(); else $("#view").innerHTML = `<div class="empty"><b>Can't reach BusyNes</b>Check your connection.</div>`;
     toast("Can't reach BusyNes. Check your connection.", {label:"Try again", run:() => enter(session)});
     window.addEventListener("online", () => enter(session), {once:true});
@@ -1112,11 +1373,42 @@ async function enter(session){
   if (pushSupported() && Notification.permission === "granted") savePushSubscription(false).catch(() => {});
 }
 function authErr(msg){ $("#authErr").textContent = msg || ""; }
+
+// ---------- sign-up check (optional: switched on by TURNSTILE_SITE_KEY in config.js) ----------
+const captcha = {key: "", widgets: {}};
+const captchaOn = () => !!captcha.key;
+let authToken = null, authCaptchaMounted = false;
+function loadTurnstile(){
+  return new Promise((resolve, reject) => {
+    if (window.turnstile) return resolve(window.turnstile);
+    const el = document.createElement("script");
+    el.src = "https://challenges.cloudflare.com/turnstile/v0/api.js?render=explicit"; el.async = true;
+    el.onload = () => resolve(window.turnstile); el.onerror = () => reject(new Error("The check couldn't load."));
+    document.head.appendChild(el);
+  });
+}
+async function mountCaptcha(sel, onToken){
+  if (!captchaOn()) return;
+  try {
+    const t = await loadTurnstile(), el = $(sel); if (!el) return;
+    el.hidden = false;
+    captcha.widgets[sel] = t.render(el, {sitekey: captcha.key, callback: onToken, "expired-callback": () => onToken(null), "error-callback": () => onToken(null)});
+  } catch(e){ /* the buttons below say what to do */ }
+}
+function resetCaptcha(sel, onToken){
+  if (!captchaOn() || !window.turnstile || captcha.widgets[sel] == null) return;
+  onToken(null); try { window.turnstile.reset(captcha.widgets[sel]); } catch(e){}
+}
+const ensureAuthCaptcha = () => { if (captchaOn() && !authCaptchaMounted){ authCaptchaMounted = true; mountCaptcha("#captchaBox", t => { authToken = t; }); } };
+const authOpts = extra => Object.assign({}, extra, captchaOn() ? {captchaToken: authToken} : {});
+const needCheck = () => captchaOn() && !authToken;
 $("#authForm").onsubmit = e => {
   e.preventDefault();
   once($("#signInBtn"), async () => {
     authErr("");
-    const {error} = await S.sb.auth.signInWithPassword({email:$("#authEmail").value.trim(), password:$("#authPass").value});
+    if (needCheck()) return authErr("Please complete the check below first.");
+    const {error} = await S.sb.auth.signInWithPassword({email:$("#authEmail").value.trim(), password:$("#authPass").value, options: captchaOn() ? {captchaToken: authToken} : undefined});
+    resetCaptcha("#captchaBox", t => { authToken = t; });
     if (error) authErr(/invalid/i.test(error.message) ? "That email and password don't match. First time here? Tap Create my login." : error.message);
   });
 };
@@ -1125,7 +1417,9 @@ $("#signUpBtn").onclick = () => once($("#signUpBtn"), async () => {
   const email = $("#authEmail").value.trim(), password = $("#authPass").value;
   if (!email || password.length < 6) return authErr("Type your email and a password of at least 6 characters, then tap Create my login.");
   // Send the confirmation link back to wherever this copy of the app is running.
-  const {data, error} = await S.sb.auth.signUp({email, password, options:{emailRedirectTo: location.origin + location.pathname}});
+  if (needCheck()) return authErr("Please complete the check below first.");
+  const {data, error} = await S.sb.auth.signUp({email, password, options: authOpts({emailRedirectTo: location.origin + location.pathname})});
+  resetCaptcha("#captchaBox", t => { authToken = t; });
   if (error) return authErr(error.message);
   if (!data.session) authErr("Check your email for a confirmation link, then come back and sign in.");
 });
@@ -1133,7 +1427,9 @@ $("#forgotBtn").onclick = () => once($("#forgotBtn"), async () => {
   authErr("");
   const email = $("#authEmail").value.trim();
   if (!email) return authErr("Type your email above first, then tap Forgot my password.");
-  const {error} = await S.sb.auth.resetPasswordForEmail(email, {redirectTo: location.origin + location.pathname});
+  if (needCheck()) return authErr("Please complete the check below first.");
+  const {error} = await S.sb.auth.resetPasswordForEmail(email, authOpts({redirectTo: location.origin + location.pathname}));
+  resetCaptcha("#captchaBox", t => { authToken = t; });
   authErr(error ? error.message : "If that email has a BusyNes login, a reset link is on its way. Check your inbox.");
 });
 $("#onboardForm").onsubmit = e => {
@@ -1141,7 +1437,7 @@ $("#onboardForm").onsubmit = e => {
   once($("#obBtn"), async () => {
     $("#obErr").textContent = "";
     const name = $("#obBiz").value.trim(); if (!name) { $("#obErr").textContent = "Give your business a name."; return; }
-    try { await createBusiness(name, $("#obKind").value.trim(), $("#obName").value.trim()); }
+    try { await createBusiness(name, $("#obKind").value.trim(), $("#obName").value.trim(), $("#obCur").value.trim()); }
     catch(err){ $("#obErr").textContent = (err && err.message) || "That didn't work. Try again."; }
   });
 };
@@ -1149,7 +1445,7 @@ $("#obCheck").onclick = () => once($("#obCheck"), async () => {
   try { await loadBusinesses(); } catch(e){ return failed(e); }
   if (S.businesses.length) await openBusiness(S.businesses[0].id); else toast("Nothing yet. Ask the owner to invite " + ((S.user && S.user.email) || "your email") + ".");
 });
-$("#obSignOut").onclick = () => S.sb.auth.signOut();
+$("#obSignOut").onclick = () => signOutFlow();
 
 // ---------- start ----------
 (function start(){
@@ -1158,6 +1454,7 @@ $("#obSignOut").onclick = () => S.sb.auth.signOut();
     show("setupScreen"); return;
   }
   S.sb = window.supabase.createClient(cfg.SUPABASE_URL, cfg.SUPABASE_ANON_KEY, {db:{schema:"busynes"}});
+  captcha.key = cfg.TURNSTILE_SITE_KEY || "";
   let lastUser;
   S.sb.auth.onAuthStateChange((_event, session) => {
     const id = session && session.user && session.user.id;
@@ -1172,6 +1469,17 @@ $("#obSignOut").onclick = () => S.sb.auth.signOut();
   });
   setInterval(() => { if (S.biz && document.visibilityState === "visible" && !$("#overlay").innerHTML && !S.editing) refresh(true); }, POLL_MS);
   document.addEventListener("visibilitychange", () => { if (S.biz && document.visibilityState === "visible") refresh(true); });
+  window.addEventListener("online", () => { if (S.biz) refresh(true); });
+  window.addEventListener("offline", () => { if (S.biz) render(); });
+  if (!navigator.onLine){   // opened with no signal: don't wait for the sign-in service
+    setTimeout(() => {
+      if (S.user || S.biz) return;
+      try {
+        const stored = JSON.parse(localStorage.getItem("sb-" + new URL(cfg.SUPABASE_URL).hostname.split(".")[0] + "-auth-token") || "null");
+        if (stored && stored.user && startOffline(stored.user)) toast("You're offline. You can still record sales.");
+      } catch(e){}
+    }, 1500);
+  }
   const wanted = new URLSearchParams(location.search).get("tab");
   if (wanted && TABS.includes(wanted)) S.tab = wanted;
   if ("serviceWorker" in navigator && location.protocol !== "file:"){

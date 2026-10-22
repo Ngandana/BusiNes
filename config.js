@@ -6,4 +6,6 @@ window.BUSYNES_CONFIG = {
   SUPABASE_ANON_KEY: "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InZianNndG9ycnh4ZHJ4cHZ0YnZzIiwicm9sZSI6ImFub24iLCJpYXQiOjE3OTE1ODM1NjAsImV4cCI6MjEwNzE1OTU2MH0.vYUk5HhV_0N-d7JG8KlMIRns2rjG1kLA9Q5hvRy3c94",
   // Public key for phone notifications (safe to share). The private key lives only in Supabase.
   VAPID_PUBLIC_KEY: "BDJTyqoGkBTlQ_6mqeSr5nQbzYpLML021NJjKIjDRIix4lwTUK1HDsfnUjSRTurOxcwxQoMLADhy-3btq3sJjVg",
+  // Optional: a free Cloudflare Turnstile "site key" switches on a human check at sign-up. Leave empty to keep it off.
+  TURNSTILE_SITE_KEY: "",
 };

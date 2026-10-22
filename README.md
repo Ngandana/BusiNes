@@ -11,6 +11,11 @@ Anyone can create their own business, invite their partners and staff, and set w
 - **Owed:** who owes what and by when, with reminders and a ready-to-send message.
 - **Stock:** goes down with every sale. Add deliveries or do a stock count. Items made to order can skip stock counting.
 - **Money:** each person's share is worked out from what was actually collected, and the settle-up says who pays whom.
+- **Profit:** tell BusyNes what each item costs you and it shows your profit, whether you're making money, losing money or on a thin margin, and which items earn the most (or sell below cost).
+- **Your data:** download your sales, products, orders or a full backup as spreadsheet (CSV) or JSON files, any time.
+- **No signal? Keep selling:** sales are saved on the phone and sent automatically when the signal is back, with the time they were really made. Nothing is recorded twice.
+- **Your currency:** each business picks its own symbol (R, $, €, KSh...).
+- **Delete your account:** from inside the app, any time. It removes your login and wipes your name, email and phone from every business you were in.
 - **Alerts and calling:** a bell, phone notifications, call and WhatsApp buttons, and a small team chat.
 - **Many businesses:** one login can belong to several businesses (for example your own, and one where you're a partner) and switch between them.
 
@@ -23,6 +28,9 @@ Anyone can create their own business, invite their partners and staff, and set w
 | Add products, change prices | yes | yes | no | no |
 | Mark everything as settled | yes | yes | no | no |
 | See own money and settle-up | yes | yes | yes | yes |
+| See what items cost and the profit | yes | yes | no | no |
+| Download their data (limited to what they can see) | yes | yes | yes | orders only |
+| Delete their own account | yes | yes | yes | yes |
 | See ownership percentages | yes | yes | no | no |
 | Invite and remove people, change roles and ownership, rename or delete the business | yes | no | no | no |
 | See orders, take them, chat | yes | yes | yes | yes |
@@ -69,6 +77,26 @@ Inside a business everyone who can sell sees **what** was sold, **when**, **who*
 6. **Email delivery (important before inviting people).** Supabase's built-in email sender only allows a handful of emails per hour, so a few people signing up at once will be blocked. In **Authentication > Emails > SMTP Settings** switch on custom SMTP with a free sender (for example Brevo, Resend or Mailgun), verify your sender address, and paste its SMTP details. Do this before sharing the app with anyone.
 7. **Authentication > URL Configuration:** set **Site URL** to your live link and add `<link>/**` and `http://127.0.0.1:5500/**` under **Redirect URLs**.
 
+## Offline sales, in detail
+
+- The app must have been opened with signal at least once on that phone (it saves the product list and stock for the Sell screen). Then, with no signal, you can open it and record sales.
+- Each sale waits on the phone and is sent when the connection returns. A banner shows what is waiting, and the stock on the tiles already counts it so the same item isn't sold twice.
+- Each sale carries a unique reference, so a retry after a dropped connection can never create a second copy. It also carries the time it really happened (up to 14 days back), but never earlier than the last "Mark as settled", so money that has already been settled can't change.
+- Only recording sales works offline. Orders, payments, stock and settings need a connection.
+- If the server refuses a waiting sale (for example you were removed from the business), it stays visible with the reason and a **Discard** button.
+- Signing out with unsent sales asks first. They stay on the phone and are sent the next time you sign in with signal.
+
+## Deleting your account
+
+Tap your name > **Delete my account**. You type your password and the word DELETE. If you run a business you must tick a box to delete it together with your account (otherwise delete or hand it over first). If you are a partner with a share somewhere, ask the owner to take you out of the ownership group first. Everywhere else you are removed, your name, email and phone are wiped, past sales stay in that business's books as "Former member", and your login is deleted.
+
+## Optional: a human check at sign-up (CAPTCHA)
+
+Off by default. Turn it on before sharing BusyNes widely, to stop automated sign-ups:
+1. Create a free **Cloudflare Turnstile** widget (dash.cloudflare.com > Turnstile). Add your live site's domain. Note the **site key** and the **secret key**.
+2. Put the site key in `config.js` as `TURNSTILE_SITE_KEY`, then redeploy the app. The check now appears on the sign-in form (it does nothing yet).
+3. Only then, in Supabase go to **Authentication > Attack Protection**, switch on **Enable CAPTCHA protection**, choose Turnstile and paste the **secret key**. Doing this before step 2 would lock everyone out.
+
 ## 3. Upgrading an existing single-business BusyNes (version 2 → 3)
 
 Running the new `schema.sql` on your existing database:
@@ -113,6 +141,7 @@ Phone notifications can arrive a little late and are not guaranteed. The bell al
 - A sale's money is shared between the **owners of what was sold**, by their percentages. A partner on 35% gets 35% of the sales; whoever physically holds the cash owes the others their parts, so nobody's cut ever looks like it's all theirs.
 - Money counts when it is **actually collected**. A customer who still owes R20 doesn't make R20 anyone's money until they pay.
 - A **loan fee** is added to what the customer owes and belongs to the lender, not the owners of the items.
+- **Profit** is your share of what you sold minus your share of what it cost. The cost of each item is saved at the time of the sale, so changing a cost later doesn't rewrite old sales. The first time you set a cost, past sales of that item that had none are filled in. Sales with no cost are left out and flagged, never guessed. Cost prices can't be read from the database tables by anyone; only owners and partners get them, through the app.
 - **Settling up** shows who pays whom to even everything out. Partners who run the same stock together can be settled as one team (a setting).
 - Changing ownership percentages applies to everything not yet settled. Mark things as settled first if you want older sales left as they were.
 

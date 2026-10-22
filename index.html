@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <title>BusyNes</title>
 <meta name="theme-color" content="#1f5a43">
-<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; img-src 'self' data:; connect-src 'self' https://*.supabase.co wss://*.supabase.co; manifest-src 'self'; base-uri 'self'; form-action 'self'">
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' https://challenges.cloudflare.com; frame-src https://challenges.cloudflare.com; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; img-src 'self' data:; connect-src 'self' https://*.supabase.co wss://*.supabase.co; manifest-src 'self'; base-uri 'self'; form-action 'self'">
 <link rel="manifest" href="manifest.webmanifest">
 <link rel="icon" href="icons/icon.svg" type="image/svg+xml">
 <link rel="apple-touch-icon" href="icons/icon-192.png">
@@ -32,6 +32,7 @@
   <form id="authForm">
     <div class="field"><label for="authEmail">Email</label><input id="authEmail" class="text" type="email" autocomplete="email" required></div>
     <div class="field"><label for="authPass">Password</label><input id="authPass" class="text" type="password" autocomplete="current-password" minlength="6" required></div>
+    <div id="captchaBox" hidden></div>
     <div class="err" id="authErr" role="alert"></div>
     <button class="btn" type="submit" id="signInBtn">Sign in</button>
     <button class="btn ghost" type="button" id="signUpBtn">First time? Create my login</button>
@@ -49,6 +50,9 @@
     <div class="field"><label for="obName">Your name</label><input id="obName" class="text" maxlength="40" autocomplete="given-name" placeholder="e.g. Thabo"></div>
     <div class="field"><label for="obBiz">Business name</label><input id="obBiz" class="text" maxlength="60" placeholder="e.g. Fat Cook" required></div>
     <div class="field"><label for="obKind">What do you sell? (optional)</label><input id="obKind" class="text" maxlength="40" placeholder="e.g. Fast food, drinks, airtime"></div>
+    <div class="field"><label for="obCur">Currency symbol</label><input id="obCur" class="text" maxlength="4" list="curList" value="R" autocomplete="off">
+      <datalist id="curList"><option value="R"><option value="$"><option value="€"><option value="£"><option value="₦"><option value="KSh"><option value="N$"><option value="P"></datalist>
+      <span class="muted" style="font-size:13px">Shown next to every amount, like R, $ or €.</span></div>
     <div class="err" id="obErr" role="alert"></div>
     <button class="btn" type="submit" id="obBtn">Create my business</button>
   </form>

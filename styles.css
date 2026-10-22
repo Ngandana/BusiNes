@@ -195,3 +195,9 @@ select.text{appearance:auto}
 .notif[aria-current="true"]{background:var(--sunk);border-radius:10px}
 .auth .card{margin-top:4px}
 .auth a,.statement a,.card a{color:var(--bottle)}
+
+/* Profit */
+.profit .big{font-family:var(--display);font-weight:800;font-size:36px;letter-spacing:-.02em;margin-top:6px}
+.profit .big.good{color:var(--good)} .profit .big.warn{color:var(--warn)} .profit .big.bad{color:var(--bad)}
+.pill.good{background:rgba(45,122,75,.16);color:var(--good)}
+.bad-text{color:var(--bad)}

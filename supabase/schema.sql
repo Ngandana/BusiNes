@@ -126,6 +126,7 @@ alter table sales    add column if not exists due_on date;            -- when an
 -- A loan fee is what the lender charges on top of the items. It belongs to fee_to, not to the owners of the items.
 alter table sales    add column if not exists loan_fee numeric(10,2) not null default 0 check (loan_fee >= 0);
 alter table sales    add column if not exists fee_to text references partners(id);
+alter table sales    add column if not exists client_ref uuid;       -- set by the phone, so a sale sent twice (poor signal) is only recorded once
 
 -- Money received against a sale. A sale paid in full has one payment; a sale on credit has
 -- less than its total until the customer pays the rest. (Existing sales are backfilled once.)
@@ -201,6 +202,7 @@ create table if not exists push_subscriptions (
 
 -- ---------------------------------------------------------------- version 3: columns for many businesses
 alter table businesses add column if not exists team_settle boolean not null default false;
+alter table businesses add column if not exists currency text not null default 'R' check (length(btrim(currency)) between 1 and 4);   -- the symbol shown with amounts
 alter table partners add column if not exists business_id uuid references businesses(id);
 alter table partners add column if not exists user_id uuid;            -- the login (auth user) behind this person
 alter table partners add column if not exists role text not null default 'partner' check (role in ('owner','partner','staff','delivery'));
@@ -211,9 +213,11 @@ alter table partners drop constraint if exists partners_email_key;     -- the sa
 alter table owner_shares  add column if not exists business_id uuid references businesses(id);
 alter table products      add column if not exists business_id uuid references businesses(id);
 alter table products      add column if not exists track_stock boolean not null default true;   -- false for made-to-order items
+alter table products      add column if not exists cost numeric(10,2) check (cost >= 0);      -- what one unit costs you (to work out profit)
 alter table stock_moves   add column if not exists business_id uuid references businesses(id);
 alter table sales         add column if not exists business_id uuid references businesses(id);
 alter table sale_items    add column if not exists business_id uuid references businesses(id);
+alter table sale_items    add column if not exists cost numeric(10,2) check (cost >= 0);      -- the product's cost at the time of the sale
 alter table sale_payments add column if not exists business_id uuid references businesses(id);
 alter table settlements   add column if not exists business_id uuid references businesses(id);
 alter table orders        add column if not exists business_id uuid references businesses(id);
@@ -273,6 +277,7 @@ create index if not exists owner_shares_biz_idx    on owner_shares (business_id)
 create index if not exists products_biz_idx        on products (business_id);
 create index if not exists stock_moves_biz_idx     on stock_moves (business_id, product_id);
 create index if not exists sales_biz_at_idx        on sales (business_id, at desc);
+create unique index if not exists sales_client_ref_uidx on sales (business_id, client_ref) where client_ref is not null;
 create index if not exists sale_items_sale_idx     on sale_items (sale_id);
 create index if not exists sale_payments_sale_idx  on sale_payments (sale_id);
 create index if not exists orders_biz_at_idx       on orders (business_id, at desc);
@@ -299,6 +304,12 @@ drop function if exists create_order(text, jsonb, text, timestamptz, boolean, nu
 drop function if exists send_message(text);
 drop function if exists mark_notifications_read(bigint);
 drop function if exists notify_all(text, text, text, text, text);
+drop function if exists add_product(uuid, text, numeric, text, boolean);
+drop function if exists update_product(text, text, numeric, boolean, boolean);
+drop function if exists add_stock_move(uuid, text, text, int);
+drop function if exists record_sale(uuid, jsonb, text, text, text, numeric, date, bigint, numeric, text);
+drop function if exists create_business(text, text, text);
+drop function if exists update_business(uuid, text, text, text, boolean);
 
 -- ---------------------------------------------------------------- who is who
 -- Used by every rule below. They only ever answer about the signed-in person.
@@ -360,8 +371,12 @@ alter table push_subscriptions enable row level security;   -- no policies: only
 
 -- Start from nothing: the app may only READ, and only the columns below. Every change goes through a function.
 revoke all on all tables in schema busynes from authenticated, anon;
-grant select on businesses, owner_shares, products, stock_moves, sale_items, sale_payments, settlements,
+grant select on businesses, owner_shares, stock_moves, sale_payments, settlements,
   orders, order_fees, notifications, messages to authenticated;
+-- Cost prices (and so profit margins) are never readable from the tables: owners and partners get them
+-- through product_costs() and my_profit(), nobody else at all.
+grant select (id, business_id, name, price, owner, sort, hidden, track_stock) on products to authenticated;
+grant select (id, business_id, sale_id, product_id, name, owner, price, qty) on sale_items to authenticated;
 -- Other people's email addresses and logins are never readable; the owner gets emails through list_members().
 grant select (id, business_id, name, phone, role, status) on partners to authenticated;
 -- Partners read sales through sales_timeline(). Directly they may only see the plain columns,
@@ -410,6 +425,18 @@ create policy messages_read on messages for select to authenticated using (my_me
 create or replace function new_id(p_prefix text default 'm') returns text
 language sql volatile as $$ select p_prefix || replace(gen_random_uuid()::text, '-', '') $$;
 
+-- Amounts in messages follow the business's own currency symbol.
+create or replace function money_text(p_symbol text, p_amount numeric) returns text
+language sql immutable as $$
+  select p_symbol || case when length(p_symbol) > 1 then ' ' else '' end ||
+         case when round(p_amount, 2) = round(p_amount) then round(p_amount)::text
+              else to_char(round(p_amount, 2), 'FM999999990.00') end
+$$;
+create or replace function biz_currency(p_biz uuid) returns text
+language sql stable security definer set search_path = busynes as $$
+  select coalesce((select currency from businesses where id = p_biz), 'R')
+$$;
+
 -- Tell one person (only if they have joined).
 create or replace function notify(p_partner text, p_kind text, p_title text, p_body text default '', p_ref text default null)
 returns void language sql security definer set search_path = busynes as $$
@@ -456,32 +483,34 @@ end $$;
 -- The businesses the signed-in person belongs to.
 drop function if exists my_businesses();
 create or replace function my_businesses()
-returns table (id uuid, name text, kind text, role text, member_id text, privacy text, owner_name text, team_settle boolean)
+returns table (id uuid, name text, kind text, role text, member_id text, privacy text, owner_name text, team_settle boolean, currency text)
 language sql stable security definer set search_path = busynes as $$
   select b.id, b.name, b.kind, p.role, p.id, b.privacy,
          (select o.name from partners o where o.business_id = b.id and o.role = 'owner' and o.status <> 'removed' limit 1),
-         b.team_settle
+         b.team_settle, b.currency
   from partners p join businesses b on b.id = p.business_id
   where p.user_id = auth.uid() and p.status = 'active'
   order by b.created_at, b.id
 $$;
 
-create or replace function create_business(p_name text, p_kind text default '', p_my_name text default '') returns uuid
+create or replace function create_business(p_name text, p_kind text default '', p_my_name text default '', p_currency text default 'R') returns uuid
 language plpgsql security definer set search_path = busynes as $$
 declare
   uid uuid := auth.uid();
   em text := lower(coalesce(auth.jwt() ->> 'email', ''));
   nm text := btrim(coalesce(p_name, ''));
   myn text := btrim(coalesce(p_my_name, ''));
+  cur text := btrim(coalesce(nullif(p_currency, ''), 'R'));
   biz uuid; mid text := new_id('m');
 begin
-  if uid is null then raise exception 'Sign in first'; end if;
+  if uid is null or not exists (select 1 from auth.users where id = uid) then raise exception 'Sign in first'; end if;
   if length(nm) not between 1 and 60 then raise exception 'Give the business a name (up to 60 letters)'; end if;
+  if length(cur) not between 1 and 4 then raise exception 'The currency symbol can be 1 to 4 characters'; end if;
   if (select count(*) from partners where user_id = uid and role = 'owner' and status = 'active') >= 5 then
     raise exception 'You can run up to 5 businesses';
   end if;
   if myn = '' then myn := initcap(split_part(em, '@', 1)); end if;
-  insert into businesses (name, kind, created_by) values (nm, left(btrim(coalesce(p_kind, '')), 40), uid) returning id into biz;
+  insert into businesses (name, kind, currency, created_by) values (nm, left(btrim(coalesce(p_kind, '')), 40), cur, uid) returning id into biz;
   insert into partners (id, business_id, user_id, email, name, role, status)
     values (mid, biz, uid, nullif(em, ''), left(myn, 40), 'owner', 'active');
   -- Everything starts out owned by the owner; give partners a share on the settings page or when inviting them.
@@ -491,25 +520,23 @@ end $$;
 
 drop function if exists update_business(uuid, text, text, text);
 create or replace function update_business(p_biz uuid, p_name text default null, p_kind text default null, p_privacy text default null,
-                                            p_team_settle boolean default null)
+                                            p_team_settle boolean default null, p_currency text default null)
 returns void language plpgsql security definer set search_path = busynes as $$
 begin
   if not has_role(p_biz, array['owner']) then raise exception 'Only the owner can change this'; end if;
   if p_name is not null and length(btrim(p_name)) not between 1 and 60 then raise exception 'Give the business a name (up to 60 letters)'; end if;
   if p_privacy is not null and p_privacy not in ('shared','private') then raise exception 'Unknown privacy setting'; end if;
+  if p_currency is not null and length(btrim(p_currency)) not between 1 and 4 then raise exception 'The currency symbol can be 1 to 4 characters'; end if;
   update businesses set name = coalesce(btrim(p_name), name), kind = coalesce(left(btrim(p_kind), 40), kind),
-                        privacy = coalesce(p_privacy, privacy), team_settle = coalesce(p_team_settle, team_settle)
+                        privacy = coalesce(p_privacy, privacy), team_settle = coalesce(p_team_settle, team_settle),
+                        currency = coalesce(btrim(p_currency), currency)
   where id = p_biz;
 end $$;
 
--- Delete a business and everything in it. The owner must type its name to confirm.
-create or replace function delete_business(p_biz uuid, p_confirm text) returns void
+-- Internal: remove a business and everything in it.
+create or replace function drop_business(p_biz uuid) returns void
 language plpgsql security definer set search_path = busynes as $$
-declare nm text;
 begin
-  if not has_role(p_biz, array['owner']) then raise exception 'Only the owner can delete the business'; end if;
-  select name into nm from businesses where id = p_biz;
-  if lower(btrim(coalesce(p_confirm, ''))) <> lower(btrim(nm)) then raise exception 'Type the business name exactly to confirm'; end if;
   delete from notifications where business_id = p_biz;
   delete from messages where business_id = p_biz;
   delete from order_fees where order_id in (select id from orders where business_id = p_biz);
@@ -524,6 +551,58 @@ begin
   delete from push_subscriptions where partner_id in (select id from partners where business_id = p_biz);
   delete from partners where business_id = p_biz;
   delete from businesses where id = p_biz;
+end $$;
+
+-- Delete a business and everything in it. The owner must type its name to confirm.
+create or replace function delete_business(p_biz uuid, p_confirm text) returns void
+language plpgsql security definer set search_path = busynes as $$
+declare nm text;
+begin
+  if not has_role(p_biz, array['owner']) then raise exception 'Only the owner can delete the business'; end if;
+  select name into nm from businesses where id = p_biz;
+  if lower(btrim(coalesce(p_confirm, ''))) <> lower(btrim(nm)) then raise exception 'Type the business name exactly to confirm'; end if;
+  perform drop_business(p_biz);
+end $$;
+
+-- Delete your own login and your personal details.
+--  * Businesses you run: you must delete them first, or pass p_delete_owned = true to delete them with your account.
+--  * Businesses where you are a partner with a share: ask the owner to take you out of the ownership groups first.
+--  * Everywhere else you are removed, and your name, email and phone are wiped from the records. Past sales stay
+--    in those businesses' books, but they now say "Former member".
+create or replace function delete_account(p_delete_owned boolean default false) returns void
+language plpgsql security definer set search_path = busynes as $$
+declare uid uuid := auth.uid(); em text; names text; r record;
+begin
+  if uid is null then raise exception 'Sign in first'; end if;
+  select string_agg(b.name, ', ') into names
+    from partners p join businesses b on b.id = p.business_id
+    where p.user_id = uid and p.role = 'owner' and p.status = 'active';
+  if names is not null and not coalesce(p_delete_owned, false) then
+    raise exception 'You run % . Delete that business first, or choose to delete it together with your account.', names;
+  end if;
+  for r in select p.id, b.name from partners p join businesses b on b.id = p.business_id
+           where p.user_id = uid and p.status = 'active' and p.role <> 'owner' loop
+    if exists (select 1 from owner_shares where partner_id = r.id) then
+      raise exception 'Ask the owner of % to take you out of the ownership groups first.', r.name;
+    end if;
+  end loop;
+
+  select lower(email) into em from auth.users where id = uid;
+  for r in select p.id, p.business_id, p.name from partners p
+           where p.user_id = uid and p.status = 'active' and p.role <> 'owner' loop
+    perform notify_all(r.business_id, 'member', r.name || ' deleted their account', 'They are no longer in the business.', null, r.id, array['owner']);
+  end loop;
+  for r in select business_id from partners where user_id = uid and role = 'owner' and status = 'active' loop
+    perform drop_business(r.business_id);
+  end loop;
+
+  delete from notifications where partner_id in (select id from partners where user_id = uid);
+  update partners set name = 'Former member', email = null, phone = null, status = 'removed', user_id = null where user_id = uid;
+  if em is not null then   -- invitations still waiting for this email
+    update partners set name = 'Former member', email = null, status = 'removed' where status = 'invited' and lower(email) = em;
+  end if;
+  delete from push_subscriptions where user_id = uid;
+  delete from auth.users where id = uid;
 end $$;
 
 -- Everyone in the business, with email addresses shown only to the owner.
@@ -672,21 +751,36 @@ begin
 end $$;
 
 -- ---------------------------------------------------------------- products, stock and settling up
-create or replace function add_product(p_biz uuid, p_name text, p_price numeric, p_group text, p_track boolean default true)
+-- Internal: set a product's cost. The first time a product gets a cost, past sales of it that had none
+-- are filled in too, so profit is meaningful straight away. Later changes only affect future sales.
+create or replace function set_product_cost(p_id text, p_cost numeric) returns void
+language plpgsql security definer set search_path = busynes as $$
+declare old_cost numeric;
+begin
+  if p_cost is null then return; end if;
+  if p_cost < 0 or p_cost > 1000000 then raise exception 'Enter what it costs you'; end if;
+  select cost into old_cost from products where id = p_id;
+  update products set cost = p_cost where id = p_id;
+  if old_cost is null then update sale_items set cost = p_cost where product_id = p_id and cost is null; end if;
+end $$;
+
+create or replace function add_product(p_biz uuid, p_name text, p_price numeric, p_group text, p_track boolean default true,
+                                       p_cost numeric default null)
 returns text language plpgsql security definer set search_path = busynes as $$
 declare pid text := new_id('p'); nm text := btrim(coalesce(p_name, ''));
 begin
   if not has_role(p_biz, array['owner','partner']) then raise exception 'Only the owner and partners can add products'; end if;
   if length(nm) not between 1 and 40 then raise exception 'Give the product a name (up to 40 letters)'; end if;
   if p_price is null or p_price < 0 or p_price > 1000000 then raise exception 'Enter a price'; end if;
+  if p_cost is not null and (p_cost < 0 or p_cost > 1000000) then raise exception 'Enter what it costs you'; end if;
   if not exists (select 1 from owner_shares where business_id = p_biz and owner = p_group) then raise exception 'Choose whose stock it is'; end if;
-  insert into products (id, business_id, name, price, owner, sort, track_stock)
-    values (pid, p_biz, nm, p_price, p_group, 99, coalesce(p_track, true));
+  insert into products (id, business_id, name, price, owner, sort, track_stock, cost)
+    values (pid, p_biz, nm, p_price, p_group, 99, coalesce(p_track, true), p_cost);
   return pid;
 end $$;
 
 create or replace function update_product(p_id text, p_name text default null, p_price numeric default null,
-                                          p_hidden boolean default null, p_track boolean default null)
+                                          p_hidden boolean default null, p_track boolean default null, p_cost numeric default null)
 returns void language plpgsql security definer set search_path = busynes as $$
 declare biz uuid;
 begin
@@ -697,9 +791,11 @@ begin
   update products set name = coalesce(btrim(p_name), name), price = coalesce(p_price, price),
                       hidden = coalesce(p_hidden, hidden), track_stock = coalesce(p_track, track_stock)
   where id = p_id;
+  perform set_product_cost(p_id, p_cost);
 end $$;
 
-create or replace function add_stock_move(p_biz uuid, p_product text, p_kind text, p_qty int) returns void
+-- p_cost: what each unit of a delivery cost. Only owners and partners can set it (it is ignored for staff).
+create or replace function add_stock_move(p_biz uuid, p_product text, p_kind text, p_qty int, p_cost numeric default null) returns void
 language plpgsql security definer set search_path = busynes as $$
 begin
   if not has_role(p_biz, array['owner','partner','staff']) then raise exception 'You can''t change stock in this business'; end if;
@@ -707,7 +803,17 @@ begin
   if p_qty is null or p_qty < 0 or p_qty > 1000000 or (p_kind = 'add' and p_qty < 1) then raise exception 'Enter a quantity'; end if;
   if not exists (select 1 from products where id = p_product and business_id = p_biz) then raise exception 'Unknown product'; end if;
   insert into stock_moves (business_id, product_id, kind, qty, by) values (p_biz, p_product, p_kind, p_qty, my_member(p_biz));
+  if p_kind = 'add' and p_cost is not null and has_role(p_biz, array['owner','partner']) then
+    perform set_product_cost(p_product, p_cost);
+  end if;
 end $$;
+
+-- What each product costs you. Owners and partners only.
+create or replace function product_costs(p_biz uuid) returns table (product_id text, cost numeric)
+language sql stable security definer set search_path = busynes as $$
+  select pr.id, pr.cost from products pr
+  where pr.business_id = p_biz and pr.cost is not null and has_role(p_biz, array['owner','partner'])
+$$;
 
 -- Stock on hand for every tracked product: last count + later deliveries - later sales.
 create or replace function stock_levels(p_biz uuid) returns table (product_id text, qty int)
@@ -750,7 +856,8 @@ end $$;
 --          to p_fee_to (default: whoever records the sale), not to the owners of the items.
 create or replace function record_sale(p_biz uuid, p_items jsonb, p_paid_to text, p_method text, p_note text default '',
                                        p_paid numeric default null, p_due date default null, p_order bigint default null,
-                                       p_fee numeric default 0, p_fee_to text default null)
+                                       p_fee numeric default 0, p_fee_to text default null,
+                                       p_client_ref uuid default null, p_at timestamptz default null)
 returns bigint
 language plpgsql security definer set search_path = busynes as $$
 declare
@@ -770,8 +877,23 @@ declare
   r record;
   qty_left int;
   cust text := left(coalesce(p_note, ''), 120);
+  sale_at timestamptz := now();
+  last_settle timestamptz;
+  cur text := biz_currency(p_biz);
 begin
   if not has_role(p_biz, array['owner','partner','staff']) then raise exception 'You can''t record sales in this business'; end if;
+  -- A phone that lost signal sends the same sale again until it gets through: record it only once.
+  if p_client_ref is not null then
+    select id into new_id from sales where business_id = p_biz and client_ref = p_client_ref and recorded_by = me;
+    if found then return new_id; end if;
+  end if;
+  -- A sale made offline keeps the time it really happened (up to 14 days back), but never before the last settle-up,
+  -- so money that has already been settled can't change.
+  select max(at) into last_settle from settlements where business_id = p_biz;
+  if p_at is not null and p_at <= now() + interval '5 minutes' and p_at > now() - interval '14 days'
+     and (last_settle is null or p_at > last_settle) then
+    sale_at := least(p_at, now());
+  end if;
   if jsonb_typeof(p_items) <> 'array' or jsonb_array_length(p_items) = 0 then
     raise exception 'A sale needs at least one item';
   end if;
@@ -784,29 +906,29 @@ begin
     raise exception 'Unknown person for the loan fee';
   end if;
   select name into my_name from partners where id = me;
-  insert into sales (business_id, paid_to, method, note, recorded_by, loan_fee, fee_to)
-    values (p_biz, p_paid_to, p_method, cust, me, fee, case when fee > 0 then fee_who end)
+  insert into sales (business_id, at, paid_to, method, note, recorded_by, loan_fee, fee_to, client_ref)
+    values (p_biz, sale_at, p_paid_to, p_method, cust, me, fee, case when fee > 0 then fee_who end, p_client_ref)
     returning id into new_id;
   for it in select * from jsonb_array_elements(p_items) loop
     select * into p from products where id = it ->> 'product_id' and business_id = p_biz;
     if not found then raise exception 'Unknown product'; end if;
     if (it ->> 'qty')::int <= 0 then raise exception 'Quantity must be at least 1'; end if;
-    insert into sale_items (business_id, sale_id, product_id, name, owner, price, qty)
-      values (p_biz, new_id, p.id, p.name, p.owner, p.price, (it ->> 'qty')::int);
+    insert into sale_items (business_id, sale_id, product_id, name, owner, price, qty, cost)
+      values (p_biz, new_id, p.id, p.name, p.owner, p.price, (it ->> 'qty')::int, p.cost);
     items_total := items_total + p.price * (it ->> 'qty')::int;
     lines := lines || case when lines = '' then '' else ', ' end || (it ->> 'qty') || ' × ' || p.name;
   end loop;
   total := items_total + fee;
 
   paid := coalesce(p_paid, total);
-  if paid < 0 or paid > total then raise exception 'The amount paid must be between R0 and the total'; end if;
+  if paid < 0 or paid > total then raise exception 'The amount paid must be between 0 and the total'; end if;
   if paid < total then
     if cust = '' then raise exception 'Put the customer''s name on a sale that is not paid in full'; end if;
     update sales set due_on = p_due where id = new_id;
   end if;
   if paid > 0 then
-    insert into sale_payments (business_id, sale_id, amount, method, paid_to, recorded_by)
-      values (p_biz, new_id, paid, p_method, p_paid_to, me);
+    insert into sale_payments (business_id, sale_id, amount, method, paid_to, recorded_by, at)
+      values (p_biz, new_id, paid, p_method, p_paid_to, me, sale_at);
   end if;
   if p_order is not null then
     update orders set status = 'done', sale_id = new_id where id = p_order and business_id = p_biz and status = 'open';
@@ -823,7 +945,7 @@ begin
     if r.id = p_paid_to then
       perform notify(r.id, case when paid < total then 'credit' else 'sale' end,
         my_name || case when paid < total then ' put a sale on credit with you' else ' recorded a sale paid to you' end,
-        lines || ' · R' || total || case when paid < total then ' · owes R' || (total - paid) ||
+        lines || ' · ' || money_text(cur, total) || case when paid < total then ' · owes ' || money_text(cur, total - paid) ||
           case when p_due is not null then ' by ' || to_char(p_due, 'DD Mon') else '' end || ' (' || cust || ')'
           else '' end,
         new_id::text);
@@ -859,19 +981,21 @@ declare
   my_name text;
   left_over numeric;
   r record;
+  cur text;
 begin
   select * into s from sales where id = p_sale;
   if not found or not has_role(s.business_id, array['owner','partner','staff']) or not sees_whole_sale(p_sale) then
     raise exception 'You can only take payments on sales you recorded or collect';
   end if;
   me := my_member(s.business_id);
+  cur := biz_currency(s.business_id);
   if p_method not in ('cash','transfer') then raise exception 'Payment must be cash or transfer'; end if;
   if p_paid_to is not null and not exists (select 1 from partners where id = p_paid_to and business_id = s.business_id and status <> 'removed') then
     raise exception 'Choose who received the money';
   end if;
   left_over := sale_outstanding(p_sale);
-  if p_amount is null or p_amount <= 0 then raise exception 'Enter an amount above R0'; end if;
-  if p_amount > left_over + 0.005 then raise exception 'That is more than what is still owed (R%)', round(left_over, 2); end if;
+  if p_amount is null or p_amount <= 0 then raise exception 'Enter an amount above 0'; end if;
+  if p_amount > left_over + 0.005 then raise exception 'That is more than what is still owed (%)', money_text(cur, left_over); end if;
   insert into sale_payments (business_id, sale_id, amount, method, paid_to, recorded_by)
     values (s.business_id, p_sale, p_amount, p_method, coalesce(p_paid_to, me), me);
   select name into my_name from partners where id = me;
@@ -880,10 +1004,10 @@ begin
          select 1 from sale_items si join owner_shares os on os.owner = si.owner and os.business_id = s.business_id
          where si.sale_id = p_sale and os.partner_id = r.id) then
       perform notify(r.id, 'payment',
-        case when r.id in (s.paid_to, s.recorded_by) then coalesce(nullif(s.note, ''), 'A customer') || ' paid R' || round(p_amount, 2)
+        case when r.id in (s.paid_to, s.recorded_by) then coalesce(nullif(s.note, ''), 'A customer') || ' paid ' || money_text(cur, p_amount)
              else 'A customer paid on your stock' end,
         case when r.id in (s.paid_to, s.recorded_by)
-             then case when left_over - p_amount <= 0.005 then 'Fully paid now' else 'R' || round(left_over - p_amount, 2) || ' still owed' end
+             then case when left_over - p_amount <= 0.005 then 'Fully paid now' else money_text(cur, left_over - p_amount) || ' still owed' end
              else 'Recorded by ' || my_name end,
         p_sale::text);
     end if;
@@ -958,7 +1082,7 @@ language sql stable security definer set search_path = busynes as $$
   left join lateral (select sum(amount) as paid from sale_payments where sale_id = s.id) p on true
   where s.business_id = p_biz and has_role(p_biz, array['owner','partner','staff'])
   order by s.at desc, s.id desc
-  limit least(greatest(coalesce(p_limit, 300), 1), 500)
+  limit least(greatest(coalesce(p_limit, 300), 1), 5000)
 $$;
 
 -- ---------------------------------------------------------------- orders
@@ -1095,7 +1219,7 @@ declare
   r record; who text; n int := 0; phrase text;
 begin
   for r in
-    select s.id, s.note, s.due_on, s.paid_to, s.recorded_by, sale_outstanding(s.id) as owing
+    select s.id, s.business_id, s.note, s.due_on, s.paid_to, s.recorded_by, sale_outstanding(s.id) as owing
     from sales s
     where s.due_on is not null and sale_outstanding(s.id) > 0.005
       and (s.due_on = today or s.due_on = today + 2 or (s.due_on < today and (today - s.due_on) % 3 = 0))
@@ -1106,7 +1230,7 @@ begin
     for who in select distinct x from unnest(array[r.paid_to, r.recorded_by]) x loop
       if not exists (select 1 from notifications where partner_id = who and kind = 'reminder'
                      and ref = r.id::text and (at at time zone 'Africa/Johannesburg')::date = today) then
-        perform notify(who, 'reminder', coalesce(nullif(r.note, ''), 'A customer') || ' owes R' || round(r.owing, 2), phrase, r.id::text);
+        perform notify(who, 'reminder', coalesce(nullif(r.note, ''), 'A customer') || ' owes ' || money_text(biz_currency(r.business_id), r.owing), phrase, r.id::text);
         n := n + 1;
       end if;
     end loop;
@@ -1257,6 +1381,109 @@ begin
     'pays', pays);
 end $$;
 
+-- Profit on what you sold in a period (p_from = null means all time): the sales of your own share of the products,
+-- minus what those items cost. It counts what was SOLD, whether or not the customer has paid yet.
+-- Items sold before a cost was set are left out and reported as missing_revenue. Loan fees collected are shown
+-- separately. Only owners and partners can ask; staff and delivery never see costs or profit.
+create or replace function my_profit(p_biz uuid, p_from timestamptz default null) returns jsonb
+language plpgsql stable security definer set search_path = busynes as $$
+declare
+  me text := my_member(p_biz);
+  prods jsonb; rev_all numeric; rev_costed numeric; cost_all numeric; fees_me numeric;
+begin
+  if not has_role(p_biz, array['owner','partner']) then raise exception 'Only the owner and partners can see profit'; end if;
+
+  select coalesce(jsonb_agg(jsonb_build_object('product_id', t.product_id, 'name', t.name, 'qty', t.qty, 'revenue', t.revenue,
+           'cost', t.cost, 'profit', t.profit, 'costed', t.costed) order by t.profit desc nulls last, t.revenue desc), '[]'::jsonb)
+  into prods
+  from (
+    select si.product_id, max(si.name) as name, sum(si.qty)::int as qty,
+           sum(si.price * si.qty * os.share) as revenue,
+           sum(case when si.cost is not null then si.cost * si.qty * os.share end) as cost,
+           sum(case when si.cost is not null then (si.price - si.cost) * si.qty * os.share end) as profit,
+           bool_and(si.cost is not null) as costed
+    from sales s
+    join sale_items si on si.sale_id = s.id
+    join owner_shares os on os.owner = si.owner and os.partner_id = me
+    where s.business_id = p_biz and (p_from is null or s.at > p_from)
+    group by si.product_id
+  ) t;
+
+  select coalesce(sum(si.price * si.qty * os.share), 0),
+         coalesce(sum(case when si.cost is not null then si.price * si.qty * os.share end), 0),
+         coalesce(sum(case when si.cost is not null then si.cost * si.qty * os.share end), 0)
+  into rev_all, rev_costed, cost_all
+  from sales s
+  join sale_items si on si.sale_id = s.id
+  join owner_shares os on os.owner = si.owner and os.partner_id = me
+  where s.business_id = p_biz and (p_from is null or s.at > p_from);
+
+  select coalesce(sum(pay.amount * s.loan_fee / (tot.v + s.loan_fee)), 0) into fees_me
+  from sale_payments pay
+  join sales s on s.id = pay.sale_id and s.fee_to = me and s.loan_fee > 0
+  join lateral (select sum(si.price * si.qty) as v from sale_items si where si.sale_id = pay.sale_id) tot on true
+  where pay.business_id = p_biz and (p_from is null or pay.at > p_from);
+
+  return jsonb_build_object(
+    'me', me,
+    'revenue', rev_all,                       -- your share of everything sold
+    'costed_revenue', rev_costed,             -- ...of which the items have a cost set
+    'cost', cost_all,                         -- what those items cost (your share)
+    'profit', rev_costed - cost_all,
+    'missing_revenue', rev_all - rev_costed,  -- sold, but no cost set, so left out of the profit
+    'fees', fees_me,
+    'products', prods);
+end $$;
+
+-- ---------------------------------------------------------------- your data
+-- A copy of everything the signed-in person is allowed to see in a business, for backups and spreadsheets.
+-- It follows exactly the same rules as the screens: staff and delivery get less, costs are for owners and partners
+-- only, and sales show money details only where the person may see them.
+create or replace function export_data(p_biz uuid) returns jsonb
+language plpgsql stable security definer set search_path = busynes as $$
+declare
+  me text := my_member(p_biz);
+  r text := my_role(p_biz);
+  b businesses%rowtype;
+  result jsonb;
+begin
+  if me is null then raise exception 'You are not part of this business'; end if;
+  select * into b from businesses where id = p_biz;
+  result := jsonb_build_object(
+    'business', jsonb_build_object('name', b.name, 'kind', b.kind, 'privacy', b.privacy, 'currency', b.currency),
+    'exported_at', now(),
+    'you', jsonb_build_object('name', (select name from partners where id = me), 'role', r),
+    'people', (select coalesce(jsonb_agg(jsonb_build_object('name', p.name, 'role', p.role, 'status', p.status,
+                        'email', case when r = 'owner' then p.email end)
+                      order by case p.role when 'owner' then 0 when 'partner' then 1 when 'staff' then 2 else 3 end, p.name), '[]'::jsonb)
+               from partners p where p.business_id = p_biz and p.status <> 'removed'),
+    'orders', (select coalesce(jsonb_agg(jsonb_build_object('at', o.at, 'customer', o.customer, 'items', o.items, 'note', o.note,
+                        'status', o.status, 'loan', o.loan, 'added_by', (select name from partners where id = o.created_by),
+                        'taken_by', (select name from partners where id = o.claimed_by)) order by o.at desc), '[]'::jsonb)
+               from (select * from orders where business_id = p_biz order by at desc limit 5000) o));
+  if r in ('owner','partner','staff') then
+    result := result || jsonb_build_object(
+      'products', (select coalesce(jsonb_agg(jsonb_build_object('name', pr.name, 'price', pr.price, 'group', pr.owner,
+                          'hidden', pr.hidden, 'tracks_stock', pr.track_stock,
+                          'cost', case when r in ('owner','partner') then pr.cost end,
+                          'stock_on_hand', (select sl.qty from stock_levels(p_biz) sl where sl.product_id = pr.id)) order by pr.sort, pr.name), '[]'::jsonb)
+                   from products pr where pr.business_id = p_biz),
+      'sales', (select coalesce(jsonb_agg(jsonb_build_object('at', t.at,
+                          'sold_by', (select name from partners where id = t.recorded_by),
+                          'money_to', (select name from partners where id = t.paid_to),
+                          'method', t.method, 'note', t.note, 'items', t.items, 'total', t.total, 'paid', t.paid,
+                          'loan_fee', t.loan_fee, 'due_on', t.due_on) order by t.at desc, t.id desc), '[]'::jsonb)
+                from sales_timeline(p_biz, 5000) t),
+      'stock_changes', (select coalesce(jsonb_agg(jsonb_build_object('at', m.at, 'product', pr.name, 'kind', m.kind, 'qty', m.qty,
+                          'by', (select name from partners where id = m.by)) order by m.at desc), '[]'::jsonb)
+                from (select * from stock_moves where business_id = p_biz order by at desc limit 5000) m
+                join products pr on pr.id = m.product_id),
+      'settle_ups', (select coalesce(jsonb_agg(jsonb_build_object('at', st.at, 'by', (select name from partners where id = st.by)) order by st.at desc), '[]'::jsonb)
+                from settlements st where st.business_id = p_biz));
+  end if;
+  return result;
+end $$;
+
 -- ---------------------------------------------------------------- who may call what
 -- Functions are closed to everyone first, then opened one by one for signed-in people.
 revoke execute on all functions in schema busynes from public, anon, authenticated;
@@ -1266,20 +1493,22 @@ grant execute on function my_member(uuid), my_role(uuid), my_members(), has_role
                           sees_whole_sale(bigint), sale_has_my_items(bigint) to authenticated;
 -- Actions and reports.
 grant execute on function
-  claim_memberships(), my_businesses(), create_business(text, text, text), update_business(uuid, text, text, text, boolean),
-  delete_business(uuid, text), list_members(uuid), my_groups(uuid),
+  claim_memberships(), my_businesses(), create_business(text, text, text, text), update_business(uuid, text, text, text, boolean, text),
+  delete_business(uuid, text), delete_account(boolean), list_members(uuid), my_groups(uuid),
   invite_member(uuid, text, text, text, text, numeric), update_member(uuid, text, text, text),
   remove_member(uuid, text), leave_business(uuid), set_group_shares(uuid, text, jsonb), delete_group(uuid, text),
-  add_product(uuid, text, numeric, text, boolean), update_product(text, text, numeric, boolean, boolean),
-  add_stock_move(uuid, text, text, int), stock_levels(uuid), mark_settled(uuid),
-  record_sale(uuid, jsonb, text, text, text, numeric, date, bigint, numeric, text),
+  add_product(uuid, text, numeric, text, boolean, numeric), update_product(text, text, numeric, boolean, boolean, numeric),
+  add_stock_move(uuid, text, text, int, numeric), product_costs(uuid), my_profit(uuid, timestamptz),
+  stock_levels(uuid), mark_settled(uuid), export_data(uuid),
+  record_sale(uuid, jsonb, text, text, text, numeric, date, bigint, numeric, text, uuid, timestamptz),
   record_payment(bigint, numeric, text, text), set_sale_due(bigint, date), delete_sale(bigint),
   my_debts(uuid), sales_timeline(uuid, int),
   create_order(uuid, text, jsonb, text, timestamptz, boolean, numeric), cancel_order(bigint), claim_order(bigint, boolean),
   send_message(uuid, text), mark_notifications_read(uuid, bigint), ping_partner(text, text), set_my_phone(text),
   save_push_subscription(text, text, text), remove_push_subscription(text), my_money(uuid, timestamptz)
 to authenticated;
--- Not callable from the app at all: new_id, notify, notify_all, sale_outstanding, send_due_reminders.
+-- Not callable from the app at all: new_id, money_text, biz_currency, notify, notify_all, sale_outstanding, set_product_cost,
+-- drop_business, send_due_reminders.
 
 -- The push sender (an Edge Function using the service_role key) reads who to notify and removes dead phones.
 grant usage on schema busynes to service_role;
