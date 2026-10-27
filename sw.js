@@ -1,6 +1,6 @@
 // Keeps the app's own files on the phone so it opens instantly.
 // Sales data always comes fresh from Supabase and is never cached here.
-const CACHE = "busynes-v10";
+const CACHE = "busynes-v16";
 const FILES = ["./", "index.html", "styles.css", "app.js", "config.js", "vendor/supabase.js", "manifest.webmanifest", "icons/icon-192.png", "icons/icon-512.png", "icons/icon.svg"];
 
 self.addEventListener("install", e => {

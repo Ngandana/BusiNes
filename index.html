@@ -28,15 +28,23 @@
 <!-- Sign in -->
 <section class="auth" id="authScreen" hidden>
   <div class="brand">Busy<span>Nes</span></div>
-  <p class="muted">Sales, stock, orders and who gets what, for your business and the people you work with. Sign in, or create a login to start your own business or join one you were invited to.</p>
+  <p class="muted">Sales, stock, orders and who gets what, for your business and the people you work with. </p>
+  <div class="chips seg authtabs" role="tablist" aria-label="Log in or create an account">
+    <button type="button" class="chip" role="tab" id="modeIn" aria-selected="true">Log in</button>
+    <button type="button" class="chip" role="tab" id="modeUp" aria-selected="false">Create account</button>
+  </div>
   <form id="authForm">
+    <h2 id="authHead">Welcome back</h2>
+    <p class="muted" id="authSub">Log in to your business.</p>
     <div class="field"><label for="authEmail">Email</label><input id="authEmail" class="text" type="email" autocomplete="email" required></div>
-    <div class="field"><label for="authPass">Password</label><input id="authPass" class="text" type="password" autocomplete="current-password" minlength="6" required></div>
+    <div class="field"><label for="authPass">Password</label><div class="pwrap"><input id="authPass" class="text" type="password" autocomplete="current-password" minlength="6" required><button class="linkbtn" type="button" id="authShow" aria-pressed="false" aria-label="Show password">Show</button></div></div>
     <div id="captchaBox" hidden></div>
     <div class="err" id="authErr" role="alert"></div>
-    <button class="btn" type="submit" id="signInBtn">Sign in</button>
-    <button class="btn ghost" type="button" id="signUpBtn">First time? Create my login</button>
+    <div class="hint" id="authHint" hidden>At least 6 characters. If someone invited you to their business, use the email they invited.</div>
+    <button class="btn" type="submit" id="signInBtn">Log in</button>
+    <button class="btn" type="submit" id="signUpBtn" hidden>Create account</button>
     <button class="linkbtn" type="button" id="forgotBtn">Forgot my password</button>
+    <p class="muted" id="authSwap" style="text-align:center;margin:12px 0 0">New to BusyNes? <button class="linkbtn" type="button" id="swapBtn">Create an account</button></p>
   </form>
   <p class="muted" style="font-size:13px">Your business is private: only you and the people you invite can see it. <a href="privacy.html">How your information is kept private</a></p>
 </section>

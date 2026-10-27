@@ -194,10 +194,29 @@ a.btn{text-decoration:none;display:inline-block;text-align:center}
 select.text{appearance:auto}
 .notif[aria-current="true"]{background:var(--sunk);border-radius:10px}
 .auth .card{margin-top:4px}
-.auth a,.statement a,.card a{color:var(--bottle)}
+.auth a:not(.btn),.statement a:not(.btn),.card a:not(.btn){color:var(--bottle)}
 
 /* Profit */
 .profit .big{font-family:var(--display);font-weight:800;font-size:36px;letter-spacing:-.02em;margin-top:6px}
 .profit .big.good{color:var(--good)} .profit .big.warn{color:var(--warn)} .profit .big.bad{color:var(--bad)}
 .pill.good{background:rgba(45,122,75,.16);color:var(--good)}
 .bad-text{color:var(--bad)}
+
+/* Review fixes */
+a.btn.ghost{color:var(--ink)}
+.authtabs{display:grid;grid-template-columns:1fr 1fr;gap:0;border:1px solid var(--line);border-radius:999px;padding:4px;background:var(--surface);overflow:visible}
+.authtabs .chip{border:0;background:none;text-align:center;padding:10px 0;font-size:15px}
+.authtabs .chip[aria-selected="true"]{background:var(--bottle);color:var(--bottle-ink)}
+.auth h2{margin:4px 0 0;font-size:22px}
+.auth .hint{font-size:13px;color:var(--muted)}
+.auth form .linkbtn{align-self:center}
+.chips.seg{flex-wrap:nowrap;overflow-x:auto;scrollbar-width:none;-webkit-overflow-scrolling:touch}
+.chips.seg::-webkit-scrollbar{display:none}
+.chips.seg .chip{padding:8px 13px;font-size:14px;white-space:nowrap;flex:none}
+.pwrap{position:relative}
+.pwrap .text{padding-right:64px}
+.pwrap .linkbtn{position:absolute;right:12px;top:50%;transform:translateY(-50%);font-weight:700}
+#sellSearch{margin-bottom:-6px}
+#salesSearch{margin-top:4px}
+.salescount .linkbtn{margin-left:8px}
+.sheet .card .eyebrow{margin-bottom:2px}

@@ -9,7 +9,9 @@ Anyone can create their own business, invite their partners and staff, and set w
 - **Sell:** tap items, choose who got the money (cash or into an account), save. Part payments, credit, and loans with a fee are built in.
 - **Orders:** write down what people ask for. Everyone is told. **I'll take it** stops two people chasing the same order. **Sell this** turns an order into a sale.
 - **Owed:** who owes what and by when, with reminders and a ready-to-send message.
-- **Stock:** goes down with every sale. Add deliveries or do a stock count. Items made to order can skip stock counting.
+- **Finding a sale:** the Sales screen has a search box (type an item, customer, person, amount or day; every word must match) and quick filters for time (today, 7 or 30 days), cash or account, and sales still owing. A line shows how many sales match and their total. It only searches what you are allowed to see.
+- **Stock:** goes down with every sale. Add stock when you buy more, or do a stock count. Items made to order can skip stock counting.
+- **Buying in packs:** for anything that comes in a pack with several items inside (a case of cider, a box of chips, a pack of 20 Russians), give the item its pack size under Stock > Update, and optionally what you call it (pack, case, box, bag, tray...). When stock arrives, choose the pack option, type how many packs and what one pack cost, and BusyNes works out the items and the cost of each one, so profit is right without any sums. Both are optional and can be changed any time.
 - **Money:** each person's share is worked out from what was actually collected, and the settle-up says who pays whom.
 - **Profit:** tell BusyNes what each item costs you and it shows your profit, whether you're making money, losing money or on a thin margin, and which items earn the most (or sell below cost).
 - **Your data:** download your sales, products, orders or a full backup as spreadsheet (CSV) or JSON files, any time.
@@ -43,6 +45,7 @@ Inside a business everyone who can sell sees **what** was sold, **when**, **who*
 - The app can only **read** a few tables. Every change goes through functions that check the person's business and role first.
 - Email addresses and login ids of other people can't be read from the API. Only the owner sees member emails, through `list_members()`.
 - There is no admin screen in the app. **Be honest with testers about one limit:** whoever administers the Supabase project can technically reach the stored data, as with almost any app. `privacy.html` says so in plain words.
+- **Fixing an invitation:** in Business settings, tap *Edit / resend* next to anyone who hasn't joined. You can correct their name or email and send the invitation again by WhatsApp, email or copy. If the corrected email already has a login, they are added straight away. Once someone has joined, their email is their login and can't be changed.
 - Invitations are tied to a verified email address. Keep **Confirm email** turned on (see setup), otherwise someone could register an address that isn't theirs and claim an invitation meant for another person.
 
 ## What's in the folder

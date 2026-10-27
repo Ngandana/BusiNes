@@ -214,6 +214,8 @@ alter table owner_shares  add column if not exists business_id uuid references b
 alter table products      add column if not exists business_id uuid references businesses(id);
 alter table products      add column if not exists track_stock boolean not null default true;   -- false for made-to-order items
 alter table products      add column if not exists cost numeric(10,2) check (cost >= 0);      -- what one unit costs you (to work out profit)
+alter table products      add column if not exists case_size int check (case_size between 2 and 1000);   -- items in one pack, for things bought in packs
+alter table products      add column if not exists pack_name text check (length(btrim(pack_name)) between 1 and 20);   -- what you call a pack: case, box, bag, tray...
 alter table stock_moves   add column if not exists business_id uuid references businesses(id);
 alter table sales         add column if not exists business_id uuid references businesses(id);
 alter table sale_items    add column if not exists business_id uuid references businesses(id);
@@ -307,8 +309,13 @@ drop function if exists notify_all(text, text, text, text, text);
 drop function if exists add_product(uuid, text, numeric, text, boolean);
 drop function if exists update_product(text, text, numeric, boolean, boolean);
 drop function if exists add_stock_move(uuid, text, text, int);
+drop function if exists add_product(uuid, text, numeric, text, boolean, numeric);
+drop function if exists add_product(uuid, text, numeric, text, boolean, numeric, int);
+drop function if exists update_product(text, text, numeric, boolean, boolean, numeric, int);
+drop function if exists update_product(text, text, numeric, boolean, boolean, numeric);
 drop function if exists record_sale(uuid, jsonb, text, text, text, numeric, date, bigint, numeric, text);
 drop function if exists create_business(text, text, text);
+drop function if exists update_member(uuid, text, text, text);
 drop function if exists update_business(uuid, text, text, text, boolean);
 
 -- ---------------------------------------------------------------- who is who
@@ -375,7 +382,7 @@ grant select on businesses, owner_shares, stock_moves, sale_payments, settlement
   orders, order_fees, notifications, messages to authenticated;
 -- Cost prices (and so profit margins) are never readable from the tables: owners and partners get them
 -- through product_costs() and my_profit(), nobody else at all.
-grant select (id, business_id, name, price, owner, sort, hidden, track_stock) on products to authenticated;
+grant select (id, business_id, name, price, owner, sort, hidden, track_stock, case_size, pack_name) on products to authenticated;
 grant select (id, business_id, sale_id, product_id, name, owner, price, qty) on sale_items to authenticated;
 -- Other people's email addresses and logins are never readable; the owner gets emails through list_members().
 grant select (id, business_id, name, phone, role, status) on partners to authenticated;
@@ -670,9 +677,11 @@ begin
   return mid;
 end $$;
 
-create or replace function update_member(p_biz uuid, p_member text, p_role text default null, p_name text default null)
+-- p_email can only be changed while the person has not joined yet (it is the address their invitation waits for).
+-- If the new address already has a confirmed login, they are added straight away.
+create or replace function update_member(p_biz uuid, p_member text, p_role text default null, p_name text default null, p_email text default null)
 returns void language plpgsql security definer set search_path = busynes as $$
-declare m partners%rowtype;
+declare m partners%rowtype; em text := lower(btrim(coalesce(p_email, ''))); uid uuid; biz_name text;
 begin
   if not has_role(p_biz, array['owner']) then raise exception 'Only the owner can change people'; end if;
   select * into m from partners where id = p_member and business_id = p_biz and status <> 'removed';
@@ -685,6 +694,20 @@ begin
     end if;
   end if;
   update partners set role = coalesce(p_role, role), name = coalesce(nullif(left(btrim(p_name), 40), ''), name) where id = p_member;
+  if p_email is not null and em <> lower(coalesce(m.email, '')) then
+    if m.status <> 'invited' then raise exception 'They have already joined, so their email is their login and can''t be changed here'; end if;
+    if em !~ '^[^@[:space:]]+@[^@[:space:]]+\.[^@[:space:]]+$' then raise exception 'That email address does not look right'; end if;
+    if exists (select 1 from partners where business_id = p_biz and status <> 'removed' and lower(email) = em and id <> p_member) then
+      raise exception 'Someone with that email is already in this business';
+    end if;
+    update partners set email = em where id = p_member;
+    select u.id into uid from auth.users u where lower(u.email) = em and u.email_confirmed_at is not null limit 1;
+    if uid is not null then
+      update partners set user_id = uid, status = 'active' where id = p_member;
+      select name into biz_name from businesses where id = p_biz;
+      perform notify(p_member, 'member', 'You were added to ' || biz_name, 'Open the business from the menu at the top.', null);
+    end if;
+  end if;
 end $$;
 
 create or replace function remove_member(p_biz uuid, p_member text) returns void
@@ -764,8 +787,10 @@ begin
   if old_cost is null then update sale_items set cost = p_cost where product_id = p_id and cost is null; end if;
 end $$;
 
+-- p_cost is what ONE item costs you. p_case_size is how many items come in a pack (for things bought in packs),
+-- and p_pack_name what you call a pack (case, box, bag...).
 create or replace function add_product(p_biz uuid, p_name text, p_price numeric, p_group text, p_track boolean default true,
-                                       p_cost numeric default null)
+                                       p_cost numeric default null, p_case_size int default null, p_pack_name text default null)
 returns text language plpgsql security definer set search_path = busynes as $$
 declare pid text := new_id('p'); nm text := btrim(coalesce(p_name, ''));
 begin
@@ -773,14 +798,18 @@ begin
   if length(nm) not between 1 and 40 then raise exception 'Give the product a name (up to 40 letters)'; end if;
   if p_price is null or p_price < 0 or p_price > 1000000 then raise exception 'Enter a price'; end if;
   if p_cost is not null and (p_cost < 0 or p_cost > 1000000) then raise exception 'Enter what it costs you'; end if;
+  if p_case_size is not null and p_case_size not between 2 and 1000 then raise exception 'A pack holds between 2 and 1000 items'; end if;
+  if length(btrim(coalesce(p_pack_name, ''))) > 20 then raise exception 'Keep the pack name short (up to 20 letters)'; end if;
   if not exists (select 1 from owner_shares where business_id = p_biz and owner = p_group) then raise exception 'Choose whose stock it is'; end if;
-  insert into products (id, business_id, name, price, owner, sort, track_stock, cost)
-    values (pid, p_biz, nm, p_price, p_group, 99, coalesce(p_track, true), p_cost);
+  insert into products (id, business_id, name, price, owner, sort, track_stock, cost, case_size, pack_name)
+    values (pid, p_biz, nm, p_price, p_group, 99, coalesce(p_track, true), p_cost, p_case_size, nullif(lower(btrim(coalesce(p_pack_name, ''))), ''));
   return pid;
 end $$;
 
+-- p_case_size: 0 removes the pack size, null leaves it as it is. p_pack_name: '' removes the name, null leaves it.
 create or replace function update_product(p_id text, p_name text default null, p_price numeric default null,
-                                          p_hidden boolean default null, p_track boolean default null, p_cost numeric default null)
+                                          p_hidden boolean default null, p_track boolean default null, p_cost numeric default null,
+                                          p_case_size int default null, p_pack_name text default null)
 returns void language plpgsql security definer set search_path = busynes as $$
 declare biz uuid;
 begin
@@ -788,8 +817,12 @@ begin
   if biz is null or not has_role(biz, array['owner','partner']) then raise exception 'Only the owner and partners can change products'; end if;
   if p_name is not null and length(btrim(p_name)) not between 1 and 40 then raise exception 'Give the product a name (up to 40 letters)'; end if;
   if p_price is not null and (p_price < 0 or p_price > 1000000) then raise exception 'Enter a price'; end if;
+  if p_case_size is not null and p_case_size <> 0 and p_case_size not between 2 and 1000 then raise exception 'A pack holds between 2 and 1000 items'; end if;
+  if length(btrim(coalesce(p_pack_name, ''))) > 20 then raise exception 'Keep the pack name short (up to 20 letters)'; end if;
   update products set name = coalesce(btrim(p_name), name), price = coalesce(p_price, price),
-                      hidden = coalesce(p_hidden, hidden), track_stock = coalesce(p_track, track_stock)
+                      hidden = coalesce(p_hidden, hidden), track_stock = coalesce(p_track, track_stock),
+                      case_size = case when p_case_size is null then case_size when p_case_size = 0 then null else p_case_size end,
+                      pack_name = case when p_pack_name is null then pack_name else nullif(lower(btrim(p_pack_name)), '') end
   where id = p_id;
   perform set_product_cost(p_id, p_cost);
 end $$;
@@ -1464,7 +1497,7 @@ begin
   if r in ('owner','partner','staff') then
     result := result || jsonb_build_object(
       'products', (select coalesce(jsonb_agg(jsonb_build_object('name', pr.name, 'price', pr.price, 'group', pr.owner,
-                          'hidden', pr.hidden, 'tracks_stock', pr.track_stock,
+                          'hidden', pr.hidden, 'tracks_stock', pr.track_stock, 'case_size', pr.case_size, 'pack_name', pr.pack_name,
                           'cost', case when r in ('owner','partner') then pr.cost end,
                           'stock_on_hand', (select sl.qty from stock_levels(p_biz) sl where sl.product_id = pr.id)) order by pr.sort, pr.name), '[]'::jsonb)
                    from products pr where pr.business_id = p_biz),
@@ -1495,9 +1528,9 @@ grant execute on function my_member(uuid), my_role(uuid), my_members(), has_role
 grant execute on function
   claim_memberships(), my_businesses(), create_business(text, text, text, text), update_business(uuid, text, text, text, boolean, text),
   delete_business(uuid, text), delete_account(boolean), list_members(uuid), my_groups(uuid),
-  invite_member(uuid, text, text, text, text, numeric), update_member(uuid, text, text, text),
+  invite_member(uuid, text, text, text, text, numeric), update_member(uuid, text, text, text, text),
   remove_member(uuid, text), leave_business(uuid), set_group_shares(uuid, text, jsonb), delete_group(uuid, text),
-  add_product(uuid, text, numeric, text, boolean, numeric), update_product(text, text, numeric, boolean, boolean, numeric),
+  add_product(uuid, text, numeric, text, boolean, numeric, int, text), update_product(text, text, numeric, boolean, boolean, numeric, int, text),
   add_stock_move(uuid, text, text, int, numeric), product_costs(uuid), my_profit(uuid, timestamptz),
   stock_levels(uuid), mark_settled(uuid), export_data(uuid),
   record_sale(uuid, jsonb, text, text, text, numeric, date, bigint, numeric, text, uuid, timestamptz),

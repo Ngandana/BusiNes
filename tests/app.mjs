@@ -34,7 +34,7 @@ const D = {
     [{id:"sibabalo",name:"Sibabalo",phone:"0821112222",role:"owner",status:"active"},{id:"vusi",name:"Vusi",phone:null,role:"partner",status:"active"},{id:"dokotela",name:"Dokotela",phone:"0833334444",role:"partner",status:"active"}],
     [{id:"m_fc",name:"Thabo",phone:null,role:"owner",status:"active"},{id:"m_n",name:"Nomsa",phone:null,role:"partner",status:"invited"}]),
   products: byBiz(
-    [{id:"nini-mimosa",name:"Nini Mimosa",price:35,owner:"sibabalo",sort:7,hidden:false,track_stock:true},{id:"heineken",name:"Heineken",price:40,owner:"beers",sort:1,hidden:false,track_stock:true},{id:"chips",name:"Chips",price:20,owner:"beers",sort:2,hidden:false,track_stock:false}],
+    [{id:"nini-mimosa",name:"Nini Mimosa",price:35,owner:"sibabalo",sort:7,hidden:false,track_stock:true},{id:"heineken",name:"Heineken",price:40,owner:"beers",sort:1,hidden:false,track_stock:true,case_size:(P.get("cases") === "1" ? 12 : null),pack_name:(P.get("pn") || (P.get("cases") === "1" ? "case" : null))},{id:"chips",name:"Chips",price:20,owner:"beers",sort:2,hidden:false,track_stock:false}].concat(P.get("many") === "1" ? [1,2,3,4,5,6,7].map(i => ({id:"x" + i, name:"Extra item " + i, price:10 + i, owner:"sibabalo", sort:20 + i, hidden:false, track_stock:false})) : []),
     []),
   stock_moves: [], settlements: [],
   order_fees: [{order_id:2, fee:40}],
@@ -92,10 +92,11 @@ const R = {
   update_business: a => { const b = BIZ.find(x => x.id === a.p_biz); if (b) { if (a.p_name != null) b.name = a.p_name; if (a.p_kind != null) b.kind = a.p_kind; if (a.p_privacy != null) b.privacy = a.p_privacy; if (a.p_team_settle != null) b.team_settle = a.p_team_settle; if (a.p_currency != null) b.currency = a.p_currency; } return null; },
 };
 function builder(table){
-  let biz = "b1";
-  const b = { select(){return b;}, order(){return b;}, limit(){return b;}, neq(){return b;}, is(){return b;}, eq(c, v){ if (c === "business_id") biz = v; return b;},
+  let biz = "b1", cols = "";
+  const b = { select(c){ cols = c || ""; return b;}, order(){return b;}, limit(){return b;}, neq(){return b;}, is(){return b;}, eq(c, v){ if (c === "business_id") biz = v; return b;},
               then(res, rej){
                 if (down()) return Promise.resolve(netErr()).then(res, rej);
+                if (table === "products" && P.get("oldprods") === "1" && /case_size/.test(cols)) return Promise.resolve({data:null, error:{message:"column products.case_size does not exist"}}).then(res, rej);
                 let d = D[table]; if (typeof d === "function") d = d(biz);
                 if (table === "notifications" && !biz) d = UNREAD;
                 return Promise.resolve({data: d || [], error: null}).then(res, rej);
@@ -145,6 +146,9 @@ const errors = [];
 async function open(query, ready = "#view .grid, #view .empty, #view h2", keep = false) {
   const page = await browser.newPage();
   await page.setViewport({ width: 390, height: 844 });
+  // Like a person: bring the button to the middle of the screen before tapping it, so the fixed tab bar can't be in the way.
+  const tap = page.click.bind(page);
+  page.click = async (sel, opts) => { await page.$eval(sel, e => e.scrollIntoView({ block: "center" })).catch(() => {}); return tap(sel, opts); };
   page.on("pageerror", e => errors.push(query + " pageerror: " + e.message));
   page.on("console", m => { if (m.type() === "error") errors.push(query + " console: " + m.text()); });
   page.on("dialog", d => d.dismiss());
@@ -220,14 +224,25 @@ console.log("\n1b. Stock: what things cost");
 await tab("stock"); t = await text();
 ok(/costs R30/.test(t) && /R10 profit each/.test(t) && /cost not set/.test(t), "the product list shows cost and profit each (Heineken costs R30, makes R10), and 'cost not set' for the rest");
 await page.click('[data-edit="heineken"]'); await page.waitForSelector("#costIn");
-ok(await page.$eval("#costIn", e => e.value === "30") && await exists("#addCost"), "the edit panel has the cost field (R30) and a cost field for deliveries");
-await page.$eval("#costIn", el => { el.value = ""; }); await page.type("#costIn", "27.5"); await page.click('[data-docost="heineken"]'); await sleep(120);
-let uc = await A.last("update_product"); ok(uc && uc[1].p_id === "heineken" && uc[1].p_cost === 27.5, "saving a cost sends update_product with the cost");
+ok(await page.$eval("#costIn", e => e.value === "30") && await exists("#addCost"), "the edit panel has the cost field (R30) and a cost field for new stock");
+ok(await exists("#saveAdd") && await exists("#saveCount") && await exists("#pdSave"), "the Update sheet has a Save button for each part: new stock, count, details");
+await page.$eval("#costIn", el => { el.value = ""; }); await page.type("#costIn", "27.5"); await page.click("#pdSave"); await sleep(150);
+let uc = await A.last("update_product"); ok(uc && uc[1].p_id === "heineken" && uc[1].p_cost === 27.5 && Object.keys(uc[1]).length === 2, "saving details sends only what changed (here just the cost)");
 await page.click('[data-edit="heineken"]').catch(() => {}); await page.waitForSelector("#addQty");
-await page.type("#addQty", "12"); await page.type("#addCost", "26"); await page.click('[data-doadd="heineken"]'); await sleep(120);
-let sm = await A.last("add_stock_move"); ok(sm && sm[1].p_qty === 12 && sm[1].p_cost === 26 && sm[1].p_kind === "add", "a delivery can carry what it cost each (R26)");
-await page.click('[data-edit="heineken"]'); await page.waitForSelector("#countQty"); await page.type("#countQty", "5"); await page.click('[data-docount="heineken"]'); await sleep(120);
+await page.type("#addQty", "12"); await page.type("#addCost", "26"); await page.click("#saveAdd"); await sleep(150);
+let sm = await A.last("add_stock_move"); ok(sm && sm[1].p_qty === 12 && sm[1].p_cost === 26 && sm[1].p_kind === "add", "adding stock can carry what each one cost (R26)");
+ok(!(await exists("#saveAdd")), "saving new stock closes the sheet");
+await page.click('[data-edit="heineken"]'); await page.waitForSelector("#countQty"); await page.type("#countQty", "5"); await page.click("#saveCount"); await sleep(150);
 sm = await A.last("add_stock_move"); ok(sm[1].p_kind === "count" && !("p_cost" in sm[1]), "a stock count never sends a cost");
+await page.click('[data-edit="heineken"]'); await page.waitForSelector("#pdSave");
+const upd0 = (await calls()).filter(c => c[0] === "update_product").length;
+await page.click("#pdSave"); await sleep(120);
+ok((await calls()).filter(c => c[0] === "update_product").length === upd0 && /Nothing has changed/.test(await text(".toast")), "saving details with no changes says so and sends nothing");
+await page.click('[data-pdhidden="yes"]'); await page.click("#pdSave"); await sleep(150);
+uc = await A.last("update_product"); ok(uc[1].p_hidden === true && Object.keys(uc[1]).length === 2, "hiding a product is a choice in the same sheet, saved with Save changes");
+await page.click('[data-edit="heineken"]'); await page.waitForSelector("#costIn"); await page.$eval("#costIn", el => { el.value = ""; }); await page.click("#pdSave"); await sleep(100);
+ok(/can be changed, but not removed/.test(await text(".toast")), "a cost can't be wiped by emptying the box (it says so)");
+await page.click("#sheetCancel");
 await page.click("[data-newprod]"); await page.waitForSelector("#npCost");
 await page.type("#npName", "Savanna"); await page.type("#npPrice", "40"); await page.type("#npCost", "28"); await page.click('[data-npowner="beers"]'); await page.click("#npSave"); await sleep(150);
 let np = await A.last("add_product"); ok(np && np[1].p_name === "Savanna" && np[1].p_cost === 28, "a new product can be added with its cost");
@@ -330,8 +345,20 @@ await page.click('[data-ivrole="partner"]'); await page.click("#ivSave"); await 
 let inv = await A.last("invite_member");
 ok(inv[1].p_biz === "b2" && inv[1].p_email === "Zola@Mail.com" && inv[1].p_role === "partner" && inv[1].p_group === "everyone" && Math.abs(inv[1].p_share - 0.35) < 1e-9, "invite sent: partner, 35% of 'everyone': " + JSON.stringify(inv[1]));
 sheet = await text(".sheet") + "\n" + await page.$eval("#ivMsg", e => e.value);
-ok(/Invitation saved/.test(sheet) && /Zola@Mail\.com/.test(sheet) && /Fat Cook/.test(sheet) && /Create my login/.test(sheet), "an invitation message is ready to copy, naming the business and the email to use");
+ok(/Invitation saved/.test(sheet) && /Zola@Mail\.com/.test(sheet) && /Fat Cook/.test(sheet) && /Create account/.test(sheet), "an invitation message is ready to copy, naming the business and the email to use");
+ok((await page.$eval("#ivWa", a => decodeURIComponent(a.href))).includes("wa.me/?text=Hi Zola") && (await page.$eval("#ivMail", a => a.href)).startsWith("mailto:Zola%40Mail.com"), "the invitation can be sent by WhatsApp or email in one tap");
 await page.click("#sheetCancel"); await sleep(60);
+// fix an invited person's details and send the invitation again
+await page.click('[data-emember="m_n"]'); await page.waitForSelector("#emEmail");
+ok(await page.$eval("#emEmail", e => e.value === "nomsa@x.com") && await exists("#emResend"), "an invited person can be edited, with 'Send the invitation again'");
+await page.$eval("#emEmail", e => { e.value = ""; }); await page.type("#emEmail", "nomsa.new@x.com"); await page.$eval("#emName", e => { e.value = ""; }); await page.type("#emName", "Nomsa Z");
+await page.click("#emResend"); await sleep(250);
+let um = await A.last("update_member");
+ok(um[1].p_member === "m_n" && um[1].p_email === "nomsa.new@x.com" && um[1].p_name === "Nomsa Z", "saving sends the corrected name and email: " + JSON.stringify(um[1]));
+ok(/Send the invitation again/.test(await text(".sheet")) && /Hi Nomsa Z/.test(await page.$eval("#ivMsg", e => e.value)) && /nomsa\.new@x\.com/.test(await page.$eval("#ivMsg", e => e.value)), "...and the message is ready to send to the new address");
+await page.click("#sheetCancel"); await sleep(60);
+await page.click('[data-emember="m_n"]'); await page.waitForSelector("#emSave"); await page.$eval("#emSave", b => b.click()); await sleep(300);
+ok(/Nothing has changed/.test(await text(".toast")), "saving without a change says so");
 // ownership: 65 / 35
 await page.$eval('[data-gs="everyone"][data-gsm="m_fc"]', el => { el.value = "60"; el.dispatchEvent(new Event("input", {bubbles:true})); });
 await page.$eval('[data-gs="everyone"][data-gsm="m_n"]', el => { el.value = "30"; el.dispatchEvent(new Event("input", {bubbles:true})); });
@@ -418,7 +445,7 @@ ok(await E.exists('[data-add="nini-mimosa"]'), "staff can sell");
 await E.tab("stock");
 ok(!(await E.exists("[data-newprod]")), "no 'Add product' button");
 await E.page.click('[data-edit="heineken"]'); await sleep(60);
-ok(await E.exists("#addQty") && !(await E.exists("#priceIn")) && !(await E.exists("[data-dohide]")), "stock can be updated, but there's no price or hide control");
+ok(await E.exists("#addQty") && !(await E.exists("#priceIn")) && !(await E.exists("[data-pdhidden]")) && !(await E.exists("#pdSave")), "stock can be updated, but there's no price, hide or details section");
 await E.tab("report"); ok(!(await E.exists("[data-settle]")), "no 'Mark as settled'");
 ok(!/Your profit/i.test(await E.text()) && !(await E.exists(".profit")), "staff don't see a profit card");
 {
@@ -427,7 +454,8 @@ ok(!/Your profit/i.test(await E.text()) && !(await E.exists(".profit")), "staff 
   await E.tab("stock"); await E.page.click('[data-edit="heineken"]'); await sleep(60);
   ok(!(await E.exists("#costIn")) && !(await E.exists("#addCost")) && !/costs R|cost not set/.test(await E.text()), "staff see no cost fields and no costs on the stock list");
 }
-await E.page.click("#meBtn"); await E.page.click("#meSettings"); await sleep(250);
+await E.page.click("#sheetCancel").catch(() => {}); await sleep(80);
+await E.page.click("#meBtn"); await E.page.waitForSelector("#meSettings"); await E.page.click("#meSettings"); await sleep(250);
 t = await E.text();
 await E.page.click('[data-export="products"]'); const ed2 = await E.download();
 ok(ed2 && !ed2.text.split("\r\n")[0].includes("Cost") && !ed2.text.includes(",30,"), "staff's products file has no cost column");
@@ -576,7 +604,7 @@ console.log("\n13. Sign-up check (CAPTCHA)");
   await C1.page.click("#signInBtn"); await sleep(250);
   let au = await C1.page.evaluate(() => window.__auth);
   ok(au.some(a => a[0] === "signIn" && a[1].options && a[1].options.captchaToken === "tok-1"), "signing in sends the check's token");
-  await C1.page.click("#signUpBtn"); await sleep(250);
+  await C1.page.click("#modeUp"); await C1.page.click("#signUpBtn"); await sleep(250);
   au = await C1.page.evaluate(() => window.__auth);
   const su = au.find(a => a[0] === "signUp");
   ok(su && su[1].options.captchaToken && su[1].options.captchaToken !== "tok-1" && su[1].options.emailRedirectTo, "each attempt needs a fresh token (the check resets), and sign-up still sends the redirect");
@@ -594,6 +622,184 @@ console.log("\n13. Sign-up check (CAPTCHA)");
   const a3 = (await C3.page.evaluate(() => window.__auth)).find(a => a[0] === "signIn");
   ok(!(await C3.visible("#captchaBox")) && a3 && !(a3[1].options && a3[1].options.captchaToken), "with no site key configured (the default) there is no check and nothing changes");
   await C3.page.close();
+}
+
+// ================================================================== 14. interface review fixes
+console.log("\n14. Interface fixes");
+{
+  const R1 = await open("?me=sibabalo"); await R1.loaded();
+  await R1.page.click("#teamBtn"); await sleep(120);
+  const callLook = await R1.page.$eval('a[href^="tel:"]', a => { const c = getComputedStyle(a); return { color: c.color, bg: c.backgroundColor, text: a.innerText }; });
+  ok(callLook.text === "Call" && callLook.color !== callLook.bg, "the Call button's text is visible (it was green on green): " + JSON.stringify(callLook));
+  await R1.tab("report");
+  const order = await R1.page.evaluate(() => { const all = [...document.querySelectorAll("#view section")]; const i = all.findIndex(x => /To settle up/i.test(x.innerText)); const j = all.findIndex(x => x.classList.contains("profit")); return [i, j]; });
+  ok(order[0] >= 0 && order[1] > order[0], "on the Money screen, who pays whom comes before profit");
+  ok(await R1.page.$eval(".chips.seg", e => getComputedStyle(e).flexWrap === "nowrap"), "the period buttons sit on one line");
+  await R1.tab("owed");
+  const wa = await R1.page.$eval('a[href^="https://wa.me/?text="]', a => decodeURIComponent(a.href.split("text=")[1]));
+  ok(/Hi Thando/.test(wa) && /R20/.test(wa), "'WhatsApp reminder' opens WhatsApp with the reminder already written: " + wa.slice(0, 60));
+  await R1.tab("sell");
+  await R1.page.click('[data-add="heineken"]'); await R1.page.click("#cartNext"); await R1.page.waitForSelector("#saveSale");
+  await R1.page.click('[data-method="cash"]'); await R1.page.click("#saveSale"); await sleep(200);
+  await R1.page.click('[data-add="heineken"]'); await R1.page.click("#cartNext"); await R1.page.waitForSelector("#saveSale");
+  ok(await R1.page.$eval('[data-method="cash"]', b => b.getAttribute("aria-pressed") === "true"), "the next sale remembers 'Cash' from the last one");
+  await R1.page.click("#sheetCancel"); await R1.page.close();
+
+  const R2 = await open("?many=1"); await R2.loaded();
+  ok(await R2.exists("#sellSearch"), "with many products the Sell screen has a search box");
+  await R2.page.type("#sellSearch", "hei"); await sleep(100);
+  const shown = await R2.page.$$eval("[data-pname]", els => els.filter(e => !e.hidden).map(e => e.dataset.pname));
+  ok(shown.length === 1 && shown[0] === "heineken", "typing 'hei' leaves only Heineken: " + shown.join(","));
+  await R2.page.$eval("#sellSearch", e => { e.value = ""; e.dispatchEvent(new Event("input")); }); await sleep(60);
+  ok((await R2.page.$$eval("[data-pname]", els => els.filter(e => !e.hidden).length)) === 10, "clearing it shows everything again");
+  await R2.page.close();
+  const R3 = await open(""); await R3.loaded(); ok(!(await R3.exists("#sellSearch")), "with only a few products there's no search box"); await R3.page.close();
+
+  const R4 = await open("?signedout=1", "#authForm"); await sleep(150);
+  await R4.page.type("#authPass", "secret1"); await R4.page.click("#authShow");
+  ok(await R4.page.$eval("#authPass", e => e.type === "text") && (await R4.text("#authShow")) === "Hide", "'Show' reveals the password while typing");
+  await R4.page.click("#authShow"); ok(await R4.page.$eval("#authPass", e => e.type === "password"), "...and 'Hide' hides it again");
+  await R4.page.close();
+}
+
+// ================================================================== 15. things bought by the case
+console.log("\n15. Things bought by the case");
+{
+  const C = await open("?cases=1&me=sibabalo"); await C.loaded(); const pg = C.page;
+  await C.tab("stock");
+  ok(/12 per case/.test(await C.text()), "the stock list shows '12 per case'");
+  await pg.click('[data-edit="heineken"]'); await pg.waitForSelector("#saveAdd");
+  ok(await pg.$eval('[data-addby="case"]', b => b.getAttribute("aria-pressed") === "true") && /How many cases came in/.test(await C.text(".sheet")), "an item with a case size opens in 'Cases' mode");
+  ok(await pg.$eval("#addSize", e => e.value === "12"), "...with the case size already filled in");
+  await pg.type("#addQty", "2"); await pg.type("#addCost", "300");
+  const sum = await C.text("#addSum");
+  ok(/2 cases × 12 = 24 items/.test(sum) && /R25 each/.test(sum) && !(await pg.$eval("#addSum", e => e.classList.contains("bad"))), "2 cases at R300 shows '24 items' and 'R25 each', with no warning: " + sum.replace(/\s+/g, " "));
+  await pg.click("#saveAdd"); await sleep(250);
+  let sm = await C.last("add_stock_move");
+  ok(sm[1].p_qty === 24 && sm[1].p_cost === 25 && sm[1].p_kind === "add", "saving sends 24 items at R25 each, not 2 items at R300");
+
+  await pg.click('[data-edit="heineken"]'); await pg.waitForSelector("#saveAdd"); await pg.click('[data-addby="item"]');
+  await pg.type("#addQty", "24"); await pg.type("#addCost", "300");
+  ok(await pg.$eval("#addSum", e => e.classList.contains("bad") && /more than you sell one for/.test(e.innerText) && /choose Cases/.test(e.innerText)), "a case price typed as the cost of ONE item warns, and points to Cases");
+  await pg.click("#sheetCancel");
+
+  await pg.click('[data-edit="heineken"]'); await pg.waitForSelector("#saveAdd"); await pg.click('[data-addby="case"]');
+  await pg.$eval("#addSize", e => { e.value = ""; }); await pg.type("#addSize", "24"); await pg.type("#addQty", "1"); await pg.type("#addCost", "480"); await pg.click("#saveAdd"); await sleep(300);
+  sm = await C.last("add_stock_move"); ok(sm[1].p_qty === 24 && sm[1].p_cost === 20, "a case of 24 at R480 works out at R20 each");
+  let up = await C.last("update_product"); ok(up && up[1].p_case_size === 24, "a different case size is remembered on the product");
+
+  await pg.click('[data-edit="heineken"]'); await pg.waitForSelector("#caseIn");
+  ok(await pg.$eval("#caseIn", e => e.value === "12"), "the product details have 'Items in a case'");
+  await pg.$eval("#costIn", e => { e.value = "300"; e.dispatchEvent(new Event("input")); });
+  ok(await pg.$eval("#costWarn", e => !e.hidden), "a cost higher than the selling price shows a warning there too");
+  await pg.$eval("#costIn", e => { e.value = "30"; e.dispatchEvent(new Event("input")); });
+  ok(await pg.$eval("#costWarn", e => e.hidden), "...which goes away when the cost makes sense");
+  await pg.$eval("#caseIn", e => { e.value = "6"; }); await pg.click("#pdSave"); await sleep(200);
+  up = await C.last("update_product"); ok(up[1].p_case_size === 6, "changing it in the details saves it");
+  await pg.click('[data-edit="heineken"]'); await pg.waitForSelector("#caseIn"); await pg.$eval("#caseIn", e => { e.value = ""; }); await pg.click("#pdSave"); await sleep(200);
+  up = await C.last("update_product"); ok(up[1].p_case_size === 0, "emptying it removes the case size (sends 0)");
+  await pg.click('[data-edit="heineken"]'); await pg.waitForSelector("#caseIn"); await pg.$eval("#caseIn", e => { e.value = "1"; }); await pg.click("#pdSave"); await sleep(100);
+  ok(/between 2 and 1000/.test(await C.text(".toast")), "a case of 1 is refused with a clear message");
+  await pg.click("#sheetCancel");
+
+  await pg.click("[data-newprod]"); await pg.waitForSelector("#npCase");
+  await pg.type("#npName", "Cider"); await pg.type("#npPrice", "40"); await pg.type("#npCase", "12"); await pg.type("#npCost", "300");
+  ok(/R300 ÷ 12 = R25 each/.test(await C.text("#npSum")) && /one whole pack/.test(await C.text("#npCostLab")), "a new product in packs: 'R300 ÷ 12 = R25 each'");
+  await pg.click("#npSave"); await sleep(250);
+  let np = await C.last("add_product"); ok(np[1].p_name === "Cider" && np[1].p_cost === 25 && np[1].p_case_size === 12, "it is saved with R25 each and 12 per case");
+  await pg.click("[data-newprod]"); await pg.waitForSelector("#npCase");
+  await pg.type("#npName", "Water"); await pg.type("#npPrice", "10"); await pg.type("#npCost", "28");
+  ok(await pg.$eval("#npSum", e => !e.hidden && e.classList.contains("bad") && /enter how many items are in it/.test(e.innerText)), "a cost above the price (no case size) warns and suggests entering the case size");
+  await pg.$eval("#npCost", e => { e.value = "6"; e.dispatchEvent(new Event("input")); }); await pg.click("#npSave"); await sleep(250);
+  np = await C.last("add_product"); ok(np[1].p_cost === 6 && !("p_case_size" in np[1]), "a single item keeps its cost as typed, with no case size");
+  await pg.close();
+
+  const T2 = await open("?role=staff&cases=1"); await T2.loaded(); await T2.tab("stock"); await T2.page.click('[data-edit="heineken"]'); await T2.page.waitForSelector("#saveAdd");
+  ok(await T2.exists('[data-addby="case"]') && !(await T2.exists("#addCost")), "staff can add stock by the case, with no cost box");
+  await T2.page.type("#addQty", "3"); await T2.page.click("#saveAdd"); await sleep(250);
+  sm = await T2.last("add_stock_move"); ok(sm[1].p_qty === 36 && !("p_cost" in sm[1]), "3 cases of 12 add 36 items");
+  ok(!(await T2.last("update_product")), "...and staff don't change the product");
+  await T2.page.close();
+
+  // other words for a pack
+  const B = await open("?cases=1&pn=bag"); await B.loaded(); await B.tab("stock");
+  ok(/12 per bag/.test(await B.text()), "a product sold in bags shows '12 per bag'");
+  await B.page.click('[data-edit="heineken"]'); await B.page.waitForSelector("#saveAdd");
+  await B.page.type("#addQty", "3"); await B.page.type("#addCost", "60");
+  const bs = await B.text("#addSum");
+  ok(/How many bags came in/.test(await B.text(".sheet")) && /3 bags × 12 = 36 items/.test(bs) && /R5 each/.test(bs), "...with the right words and sum: " + bs.replace(/\s+/g, " "));
+  await B.page.$eval("#addPack", e => { e.value = ""; }); await B.page.type("#addPack", "tray"); await sleep(60);
+  ok(/3 trays × 12 = 36 items/.test(await B.text("#addSum")) && /Trays/.test(await B.text('[data-addby="case"]')), "typing another name changes the words straight away (trays)");
+  await B.page.click("#saveAdd"); await sleep(300);
+  let pu = await B.last("update_product"); ok(pu && pu[1].p_pack_name === "tray" && pu[1].p_case_size === 12, "the new name is remembered on the product");
+  await B.page.click('[data-edit="heineken"]'); await B.page.waitForSelector("#packIn");
+  ok(await B.page.$eval("#packIn", e => e.value === "bag"), "the details have 'What do you call a pack?'");
+  await B.page.$eval("#packIn", e => { e.value = "box"; }); await B.page.click("#pdSave"); await sleep(200);
+  pu = await B.last("update_product"); ok(pu[1].p_pack_name === "box", "changing it in the details saves it");
+  await B.page.close();
+  const N0 = await open("?cases=1&pn=zzz"); await N0.loaded(); await N0.tab("stock");
+  await N0.page.click("[data-newprod]"); await N0.page.waitForSelector("#npCase");
+  ok(!(await N0.visible("#npPack")), "the pack name box appears only once a pack size is typed");
+  await N0.page.type("#npName", "Russians"); await N0.page.type("#npPrice", "15"); await N0.page.type("#npCase", "20");
+  ok(await N0.visible("#npPack"), "...now it shows");
+  await N0.page.type("#npPack", "Pack"); await N0.page.type("#npCost", "100");
+  ok(/R100 ÷ 20 = R5 each/.test(await N0.text("#npSum")), "a pack of 20 at R100 works out at R5 each");
+  await N0.page.click("#npSave"); await sleep(250);
+  const nr = await N0.last("add_product"); ok(nr[1].p_case_size === 20 && nr[1].p_pack_name === "pack" && nr[1].p_cost === 5, "saved as 20 per pack, R5 each, named 'pack'");
+  await N0.page.close();
+
+  const OD = await open("?oldprods=1"); await OD.loaded();
+  ok(await OD.exists('[data-add="heineken"]'), "before the database update the app still works (products load without the case size)");
+  await OD.page.close();
+}
+
+// ================================================================== 16. log in / create account
+console.log("\n16. Log in or create an account");
+{
+  const L = await open("?signedout=1", "#authForm"); await sleep(150); const pg = L.page;
+  ok(await pg.$eval("#modeIn", e => e.getAttribute("aria-selected") === "true") && await L.visible("#signInBtn") && !(await L.visible("#signUpBtn")) && await L.visible("#forgotBtn"), "it opens on 'Log in' with a Log in button and 'Forgot my password'");
+  await pg.click("#modeUp"); await sleep(60);
+  ok(await L.visible("#signUpBtn") && !(await L.visible("#signInBtn")) && !(await L.visible("#forgotBtn")) && /Create your account/.test(await L.text("#authHead")), "'Create account' shows a sign-up form without the log-in extras");
+  ok(await pg.$eval("#authPass", e => e.autocomplete === "new-password"), "the password manager is told it is a new password");
+  await pg.type("#authEmail", "new@b.com"); await pg.type("#authPass", "123"); await pg.click("#signUpBtn"); await sleep(120);
+  ok(!(await pg.evaluate(() => window.__auth)).some(a => a[0] === "signUp"), "a too-short password is not sent (the phone asks for 6 characters)");
+  await pg.$eval("#authPass", e => { e.value = "secret1"; }); await pg.click("#signUpBtn"); await sleep(250);
+  ok((await pg.evaluate(() => window.__auth)).some(a => a[0] === "signUp"), "creating the account sends the sign-up");
+  ok(await L.visible("#signInBtn") && /confirmation link/.test(await L.text("#authErr")), "after creating the account it returns to Log in with a 'check your email' message");
+  await pg.click("#swapBtn"); await sleep(60); await pg.click("#swapBtn"); await sleep(60);
+  ok(await L.visible("#signInBtn") && !(await L.visible("#signUpBtn")), "'Already have an account? Log in' switches back");
+  await pg.close();
+}
+
+// ================================================================== 17. searching and filtering sales
+console.log("\n17. Search and filter sales");
+{
+  const S1 = await open("?me=sibabalo"); await S1.loaded(); const pg = S1.page; await S1.tab("sales");
+  const n = () => pg.$$eval(".sale", els => els.length);
+  ok((await n()) === 2 && await S1.exists("#salesSearch"), "the Sales screen has a search box (2 sales to start with)");
+  await pg.type("#salesSearch", "tha"); await sleep(80); await pg.type("#salesSearch", "ndo"); await sleep(80);
+  ok((await n()) === 1 && /Thando|Nini Mimosa/.test(await S1.text(".sale")) && /1 sale/.test(await S1.text(".salescount")), "typing a customer's name finds that sale, and typing keeps going (the box keeps focus)");
+  ok(await pg.$eval("#salesSearch", e => e === document.activeElement && e.value === "thando"), "...the box still has focus and its text");
+  await pg.$eval("#salesSearch", e => { e.value = ""; }); await pg.type("#salesSearch", "black label"); await sleep(120);
+  ok((await n()) === 1 && /Black Label/.test(await S1.text(".sale")), "an item name finds the sale it was in");
+  await pg.$eval("#salesSearch", e => { e.value = ""; }); await pg.type("#salesSearch", "vusi cash"); await sleep(120);
+  ok((await n()) === 1 && /Nini Mimosa/.test(await S1.text(".sale")), "several words must all match (who sold it + cash)");
+  await pg.$eval("#salesSearch", e => { e.value = ""; }); await pg.type("#salesSearch", "zzzz"); await sleep(120);
+  ok((await n()) === 0 && /No sales match/.test(await S1.text()), "nothing found says so");
+  await pg.click("[data-sclear]"); await sleep(120);
+  ok((await n()) === 2 && !(await S1.exists(".salescount")), "'Clear search' brings everything back");
+  await pg.click('[data-smethod="cash"]'); await sleep(80);
+  ok((await n()) === 1 && /Nini Mimosa/.test(await S1.text(".sale")), "the Cash filter leaves only cash sales");
+  await pg.click('[data-smethod="transfer"]'); await sleep(80);
+  ok((await n()) === 1 && /Black Label/.test(await S1.text(".sale")), "the Account filter leaves only account sales");
+  await pg.click('[data-smethod="all"]'); await pg.click('[data-sstatus="owing"]'); await sleep(80);
+  ok((await n()) === 1 && /Owes R20/.test(await S1.text(".sale")), "'Still owing' shows only sales with a balance");
+  ok(/R70/.test(await S1.text(".salescount")), "the count line shows how many sales and their total");
+  await pg.click('[data-sstatus="all"]'); await pg.click('[data-speriod="today"]'); await sleep(80);
+  ok((await n()) === 2, "'Today' keeps today's sales");
+  await pg.click("[data-sfilter=\"mine\"]"); await sleep(80);
+  ok((await n()) === 1 && /Black Label/.test(await S1.text(".sale")), "it combines with 'Mine'");
+  await pg.close();
 }
 
 // ================================================================== done

@@ -418,4 +418,65 @@ T.ok(GP === null, "an owner who chooses to can delete their businesses together 
 T.ok((await db.query(`select count(*)::int c from busynes.businesses where id = '${GB}'`)).rows[0].c === 0 && (await db.query(`select count(*)::int c from busynes.partners where business_id = '${GB}'`)).rows[0].c === 0, "...and the business and everyone's place in it are gone");
 T.ok((await db.query("select count(*)::int c from busynes.partners where lower(email) = 'later@x.com'")).rows[0].c === 0, "(an invitation to someone else was removed with that business)");
 
+// ============================================================ O. cases
+T.section("O. Things bought by the case");
+for (const [n, e] of [["cas", "cas@x.com"], ["casst", "casst@x.com"]]) await h.addUser(n, e);
+const CB = (await one("cas", `select busynes.create_business('Cider Co', '', 'Cas') id`)).id;
+await invite("cas", CB, "casst@x.com", "Staff", "staff");
+const cider = (await one("cas", `select busynes.add_product('${CB}', 'Cider', 40, 'everyone', true, 25, 12) id`)).id;
+const caseOf = async who => (await rows(who, `select case_size from busynes.products where id = '${cider}'`))[0].case_size;
+T.ok((await caseOf("cas")) === 12 && (await caseOf("casst")) === 12, "a product remembers how many are in a case, and staff can read it (it isn't sensitive)");
+T.ok((await h.err("cas", `select busynes.add_product('${CB}', 'Bad', 10, 'everyone', true, null, 1)`)) !== null && (await h.err("cas", `select busynes.add_product('${CB}', 'Bad', 10, 'everyone', true, null, 5000)`)) !== null, "a case must hold between 2 and 1000 items");
+await q("cas", `select busynes.update_product('${cider}', null, null, null, null, null, 24)`);
+T.ok((await caseOf("cas")) === 24, "the case size can be changed (12 to 24)");
+await q("cas", `select busynes.update_product('${cider}', 'Cider 440ml')`);
+T.ok((await caseOf("cas")) === 24, "other changes leave it alone");
+T.ok((await h.err("casst", `select busynes.update_product('${cider}', null, null, null, null, null, 6)`)) !== null, "staff can't change it");
+await q("cas", `select busynes.update_product('${cider}', null, null, null, null, null, 0)`);
+T.ok((await caseOf("cas")) === null, "0 removes the case size");
+// the real fix: cost is stored per ITEM, so profit per item is right
+await q("cas", `select busynes.update_product('${cider}', null, null, null, null, null, 12)`);
+await q("cas", `select busynes.add_stock_move('${CB}', '${cider}', 'add', 24, 25)`);          // 2 cases: the app sends 24 items at R25 each (R300 per case of 12)
+const casM = await memberOf("cas", CB);
+await sale("cas", CB, [{ product_id: cider, qty: 12 }], casM);                                // sold a case worth of items at R40
+const cp = (await one("cas", `select busynes.my_profit('${CB}') p`)).p;
+T.ok(T.near(cp.revenue, 480) && T.near(cp.cost, 300) && T.near(cp.profit, 180), "12 items bought at R300 a case and sold at R40 each: profit R180, not a loss (revenue 480, cost 300)");
+T.ok((await one("cas", `select qty from busynes.stock_levels('${CB}') where product_id = '${cider}'`)).qty === 12, "stock counts items: 24 added, 12 sold, 12 left");
+T.ok((await one("cas", `select busynes.export_data('${CB}') d`)).d.products.find(p => p.name === "Cider 440ml").case_size === 12, "the case size is in the backup file");
+
+// the pack can have its own name (case, box, bag, tray...)
+const packOf = async who => (await rows(who, `select pack_name from busynes.products where id = '${cider}'`))[0].pack_name;
+T.ok((await packOf("cas")) === null, "a pack has no special name until you give it one");
+await q("cas", `select busynes.update_product('${cider}', p_pack_name => 'Case')`);
+T.ok((await packOf("cas")) === "case" && (await packOf("casst")) === "case", "the pack name is kept (lower case) and staff can read it");
+await q("cas", `select busynes.update_product('${cider}', 'Cider')`);
+T.ok((await packOf("cas")) === "case", "other changes leave the name alone");
+T.ok((await h.err("cas", `select busynes.update_product('${cider}', p_pack_name => 'a very very long pack name here')`)) !== null, "a long pack name is refused");
+T.ok((await h.err("casst", `select busynes.update_product('${cider}', p_pack_name => 'box')`)) !== null, "staff can't change it");
+const rus = (await one("cas", `select busynes.add_product('${CB}', 'Russians', 15, 'everyone', true, 1.5, 20, 'Pack') id`)).id;
+T.ok((await rows("cas", `select pack_name, case_size from busynes.products where id = '${rus}'`))[0].pack_name === "pack", "a new product can be created with its pack size and name");
+await q("cas", `select busynes.update_product('${cider}', p_pack_name => '')`);
+T.ok((await packOf("cas")) === null, "an empty name removes it");
+T.ok((await one("cas", `select busynes.export_data('${CB}') d`)).d.products.find(p => p.name === "Russians").pack_name === "pack", "the pack name is in the backup file");
+
+// ============================================================ P. fixing and resending invitations
+T.section("P. Fixing an invitation");
+for (const [n, e] of [["inv", "inv@x.com"], ["invbig", "invbig@x.com"]]) await h.addUser(n, e);
+const IB = (await one("inv", `select busynes.create_business('Invite Co', '', 'Inv') id`)).id;
+const wrongM = (await invite("inv", IB, "typo@x.com", "Zee", "staff")).id;
+const emailOf = async () => (await rows("inv", `select email from busynes.list_members('${IB}') where id = '${wrongM}'`))[0].email;
+await q("inv", `select busynes.update_member('${IB}', '${wrongM}', null, 'Zee Z', 'Right@X.com')`);
+T.ok((await emailOf()) === "right@x.com", "the owner can correct the email of someone who hasn't joined (stored in lower case)");
+T.ok((await h.err("inv", `select busynes.update_member('${IB}', '${wrongM}', null, null, 'not-an-email')`)) !== null, "a bad email is refused");
+await invite("inv", IB, "other@x.com", "Other", "staff");
+T.ok((await h.err("inv", `select busynes.update_member('${IB}', '${wrongM}', null, null, 'other@x.com')`)) !== null, "...and so is an email that someone else in the business already has");
+T.ok((await h.err("invbig", `select busynes.update_member('${IB}', '${wrongM}', null, null, 'x@x.com')`)) !== null, "someone outside the business can't change it");
+await q("inv", `select busynes.update_member('${IB}', '${wrongM}', null, 'Zee Again')`);
+T.ok((await emailOf()) === "right@x.com", "changing only the name leaves the email alone");
+await h.addUser("rightp", "right@x.com");
+await q("inv", `select busynes.update_member('${IB}', '${wrongM}', null, null, 'typo2@x.com')`);
+await q("inv", `select busynes.update_member('${IB}', '${wrongM}', null, null, 'right@x.com')`);
+T.ok((await one("inv", `select status from busynes.list_members('${IB}') where id = '${wrongM}'`)).status === "active", "if the corrected email already has a login, they are added straight away");
+T.ok((await h.err("inv", `select busynes.update_member('${IB}', '${wrongM}', null, null, 'another@x.com')`)) !== null, "once someone has joined, their email can't be changed");
+
 process.exit(T.done());

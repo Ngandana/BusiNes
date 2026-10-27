@@ -5,7 +5,7 @@
 (() => {
 "use strict";
 
-const VERSION = "3.3";
+const VERSION = "3.5";
 const LOW = 3;               // "running low" threshold
 const POLL_MS = 20000;       // refresh while the app is open
 const OWNER_COLORS = ["var(--beer)", "var(--sib)", "var(--bottle)", "var(--warn)"]; // given to owner groups in order
@@ -15,7 +15,7 @@ const S = {
   sb: null, user: null, me: null,
   biz: null, businesses: [], unreadBy: {}, members: null,
   partners: [], shares: [], products: [], stock: {}, moves: [], sales: [], settlements: [], money: null,
-  orders: [], debts: [], notifs: [], messages: [], seenNotif: null, fromOrder: null, salesFilter: "all", orderFees: {}, costs: {}, profit: null,
+  orders: [], debts: [], notifs: [], messages: [], seenNotif: null, fromOrder: null, salesFilter: "all", sq: "", speriod: "all", smethod: "all", sstatus: "all", orderFees: {}, costs: {}, profit: null,
   tab: "sell", cart: {}, period: "settle", editing: null, confirmDel: null, loaded: false, offline: false,
 };
 const store = {
@@ -215,7 +215,24 @@ function wipeLocal(everything){
   } catch(e){}
 }
 
-const PRODUCT_COLS = "id,business_id,name,price,owner,sort,hidden,track_stock";
+// Things bought in a pack (a case, a box, a bag of 20...). Each product can remember its pack size and what you call a pack.
+const PRODUCT_COLS = "id,business_id,name,price,owner,sort,hidden,track_stock,case_size,pack_name";
+const PRODUCT_COLS_MID = "id,business_id,name,price,owner,sort,hidden,track_stock,case_size";
+const PRODUCT_COLS_OLD = "id,business_id,name,price,owner,sort,hidden,track_stock";
+async function loadProducts(b){
+  const q = cols => S.sb.from("products").select(cols).eq("business_id", b).order("sort").order("name");
+  try { return await must(q(PRODUCT_COLS)); }
+  catch(e){
+    const m = (e && e.message) || "";
+    if (/pack_name/i.test(m)) { try { return await must(q(PRODUCT_COLS_MID)); } catch(e2){ if (/case_size/i.test((e2 && e2.message) || "")) return await must(q(PRODUCT_COLS_OLD)); throw e2; } }
+    if (/case_size/i.test(m)) return await must(q(PRODUCT_COLS_OLD));
+    throw e;
+  }
+}
+const packWord = p => ((p && p.pack_name) || "pack").toLowerCase();
+const plural = (w, n) => n === 1 ? w : (/(s|x|ch|sh)$/.test(w) ? w + "es" : w + "s");
+const cap = s => s.charAt(0).toUpperCase() + s.slice(1);
+const PACK_LIST = `<datalist id="packNames">${["pack", "case", "box", "bag", "tray", "crate", "carton", "bundle", "dozen"].map(x => `<option value="${x}">`).join("")}</datalist>`;
 async function loadAll(){
   const sb = S.sb, b = bid(), full = canSell();
   const [partners, shares, orders, notifs, messages, fees, unread] = await Promise.all([
@@ -230,7 +247,7 @@ async function loadAll(){
   let products = [], stock = [], moves = [], sales = [], settlements = [], debts = [];
   if (full){
     [products, stock, moves, sales, settlements, debts] = await Promise.all([
-      must(sb.from("products").select(PRODUCT_COLS).eq("business_id", b).order("sort").order("name")),
+      loadProducts(b),
       must(sb.rpc("stock_levels", {p_biz: b})),
       must(sb.from("stock_moves").select("*").eq("business_id", b).order("at",{ascending:false}).limit(8)),
       must(sb.rpc("sales_timeline", {p_biz: b, p_limit: 300})),
@@ -301,7 +318,7 @@ async function openBusiness(id, keepTab){
   const b = S.businesses.find(x => x.id === id); if (!b) return;
   S.biz = b; S.me = b.member_id; store.set("busynes.biz", id);
   Object.assign(S, {partners:[], shares:[], products:[], stock:{}, moves:[], sales:[], settlements:[], money:null, orders:[], debts:[], notifs:[],
-    messages:[], seenNotif:null, fromOrder:null, orderFees:{}, costs:{}, profit:null, cart:{}, loaded:false, editing:null, confirmDel:null, members:null, salesFilter:"all", period:"settle"});
+    messages:[], seenNotif:null, fromOrder:null, orderFees:{}, costs:{}, profit:null, cart:{}, loaded:false, editing:null, confirmDel:null, members:null, salesFilter:"all", sq:"", speriod:"all", smethod:"all", sstatus:"all", period:"settle"});
   draft = freshDraft();
   // Switching business lands on a normal start screen; opening the app again keeps where you were.
   if (!NAV().includes(S.tab) && !(keepTab && (S.tab === "team" || S.tab === "settings"))) S.tab = NAV()[0];
@@ -347,11 +364,13 @@ function render(){
   else html = viewReport();
   // Don't wipe a half-typed chat message when the screen refreshes.
   const chat = $("#chatInput"), keep = chat && {v: chat.value, focus: document.activeElement === chat};
+  const focusId = document.activeElement && ["sellSearch", "salesSearch"].includes(document.activeElement.id) ? document.activeElement.id : null;
   $("#view").innerHTML = html;
   const chat2 = $("#chatInput");
   if (keep && chat2){ chat2.value = keep.v; if (keep.focus) chat2.focus(); }
   const box = $("#chatBox"); if (box && !keep) box.scrollTop = box.scrollHeight;
   bindView();
+  if (focusId && $("#" + focusId)){ const el = $("#" + focusId); el.focus(); el.setSelectionRange(el.value.length, el.value.length); }
   renderCart();
   renderBadges();
 }
@@ -360,6 +379,7 @@ function viewSell(){
   if (!S.products.length) return `<div class="empty"><b>No products yet</b>${canManage() ? "Add what you sell and its price on the Stock tab, then come back here to sell." : "The owner hasn't added any products yet."}</div>`;
   const os = owners(), single = Object.keys(os).length === 1;
   let h = offlineBanner();
+  if (S.products.filter(p => !p.hidden).length > 8) h += `<input id="sellSearch" class="text" type="search" placeholder="Find a product" aria-label="Find a product" autocomplete="off">`;
   for (const o of Object.values(os)){
     const ps = S.products.filter(p => p.owner === o.id && !p.hidden);
     if (!ps.length) continue;
@@ -368,7 +388,7 @@ function viewSell(){
       const q = S.cart[p.id] || 0, tracked = p.track_stock !== false;
       const st = tracked ? (S.stock[p.id] || 0) - q - pendingQty(p.id) : null;
       const cls = !tracked ? "" : st <= 0 ? "out" : st <= LOW ? "low" : "";
-      h += `<div style="position:relative;min-width:0">
+      h += `<div style="position:relative;min-width:0" data-pname="${esc(p.name.toLowerCase())}">
         <button class="tile ${q ? "in" : ""}" type="button" data-add="${esc(p.id)}" aria-label="Add one ${esc(p.name)}">
           <span class="stripe" style="background:${o.color}"></span>
           <span class="name">${esc(p.name)}</span>
@@ -400,7 +420,7 @@ let draft = freshDraft();
 function checkout(){
   const lines = cartLines(); if (!lines.length) return;
   if (!draft.paidTo) draft.paidTo = S.me;
-  if (!draft.method) draft.method = "transfer";
+  if (!draft.method) draft.method = store.get("busynes.method." + bid()) || "transfer";
   if (!draft.feeTo) draft.feeTo = S.me;
   const total = lines.reduce((a,l) => a + l.qty*l.price, 0);
   // fee only applies to a loan; "paid now" is everything for full, a typed amount for part, nothing for credit/loan
@@ -471,7 +491,7 @@ function checkout(){
       p_fee: fee, p_fee_to: fee > 0 ? (draft.feeTo || S.me) : null,
       p_client_ref: newRef(), p_at: sale.at,          // so a retry can't double-record it, and it keeps the time it happened
     };
-    const finish = () => { S.cart = {}; S.fromOrder = null; draft = freshDraft(); closeSheet(); };
+    const finish = () => { store.set("busynes.method." + bid(), sale.method); S.cart = {}; S.fromOrder = null; draft = freshDraft(); closeSheet(); };
     const keepOnPhone = () => { queueSale(args, lines, total, sale.paidTo); finish(); toast("Saved on this phone. It will be sent when you're back online."); render(); };
     if (!navigator.onLine){ keepOnPhone(); return; }
     try {
@@ -521,7 +541,8 @@ function viewOwed(){
         <div class="sub">${esc(d.items)} · ${money2(d.paid)} of ${money2(d.total)} paid · ${dayLabel(d.at)}${d.paid_to !== S.me ? " · " + esc(Pname(d.paid_to)) + " collects" : ""}</div>
         <div class="row" style="margin-top:6px">${num(d.loan_fee) > 0 ? `<span class="pill warn">Loan · ${money2(d.loan_fee)} fee</span>` : ""}<span class="pill ${di.cls}">${esc(di.label)}</span><span class="spacer"></span>
           <button class="linkbtn" type="button" data-due="${d.sale_id}">Change date</button>
-          <button class="linkbtn" type="button" data-remind="${d.sale_id}">Copy reminder</button>
+          <a class="linkbtn" href="https://wa.me/?text=${encodeURIComponent(reminderText(d))}" target="_blank" rel="noopener">WhatsApp reminder</a>
+          <button class="linkbtn" type="button" data-remind="${d.sale_id}">Copy</button>
           <button class="btn small" type="button" data-pay="${d.sale_id}">Got payment</button></div></div>`;
     }).join("") + `</div></section>`;
   }
@@ -728,30 +749,15 @@ function goTab(t){
 function viewStock(){
   const os = owners(), single = Object.keys(os).length === 1;
   let h = `<div class="row"><h2>Stock on hand</h2><span class="spacer"></span>${canManage() ? `<button class="btn small" type="button" data-newprod>Add product</button>` : ""}</div>
-    <p class="muted" style="margin:-12px 0 0">Stock drops by itself with every sale. Add deliveries when you buy more, or do a stock count to correct it.</p>`;
+    <p class="muted" style="margin:-12px 0 0">Stock drops by itself with every sale. Add stock when you buy more, or do a stock count to correct it.</p>`;
   if (!S.products.length) return h + `<div class="empty"><b>No products yet</b>${canManage() ? "Tap Add product to set up the first thing you sell." : "The owner hasn't added any products yet."}</div>`;
   for (const o of Object.values(os)){
     const list = S.products.filter(p => p.owner === o.id); if (!list.length) continue;
     h += `<section class="card">${single ? "" : `<div class="owner-head"><span class="owner-tag"><i style="background:${o.color}"></i>${esc(o.name)}'s</span></div>`}<div class="list">`;
     for (const p of list){
       const tracked = p.track_stock !== false, n = S.stock[p.id] || 0, cls = !tracked ? "" : n <= 0 ? "out" : n <= LOW ? "low" : "";
-      if (S.editing === p.id){
-        h += `<div class="item" style="flex-direction:column;align-items:stretch;gap:12px">
-          <div class="title">${esc(p.name)} <span class="muted">${tracked ? "· " + n + " in stock" : "· stock not tracked"}</span></div>
-          ${tracked ? `<div class="row"><div class="field" style="flex:1;min-width:120px"><label for="addQty">Delivery: add</label><div class="stepper"><input id="addQty" class="text num" type="number" inputmode="numeric" min="1" step="1" placeholder="0"><button class="btn small" type="button" data-doadd="${esc(p.id)}">Add</button></div></div>
-          <div class="field" style="flex:1;min-width:120px"><label for="countQty">Stock count: set to</label><div class="stepper"><input id="countQty" class="text num" type="number" inputmode="numeric" min="0" step="1" placeholder="${Math.max(n,0)}"><button class="btn small ghost" type="button" data-docount="${esc(p.id)}">Set</button></div></div></div>
-          ${canManage() ? `<div class="field"><label for="addCost">What this delivery cost you, each (optional, R)</label><input id="addCost" class="text num" type="number" inputmode="decimal" min="0" step="0.01" placeholder="${S.costs[p.id] != null ? S.costs[p.id] : "e.g. 25"}"><span class="muted" style="font-size:13px">Used to work out your profit from now on.</span></div>` : ""}` : ""}
-          ${canManage() ? `<div class="field"><label for="nameIn">Name</label><div class="stepper"><input id="nameIn" class="text" maxlength="40" value="${esc(p.name)}" style="width:100%"><button class="btn small ghost" type="button" data-doname="${esc(p.id)}">Save</button></div></div>
-          <div class="field"><label for="costIn">What it costs you, each (${cur()})</label><div class="stepper"><input id="costIn" class="text num" type="number" inputmode="decimal" min="0" step="0.01" placeholder="e.g. 25" value="${S.costs[p.id] != null ? S.costs[p.id] : ""}"><button class="btn small ghost" type="button" data-docost="${esc(p.id)}">Save</button></div></div>
-          <div class="row"><div class="field" style="flex:1;min-width:120px"><label for="priceIn">Price (${cur()})</label><div class="stepper"><input id="priceIn" class="text num" type="number" inputmode="decimal" min="0" step="1" value="${num(p.price)}"><button class="btn small ghost" type="button" data-doprice="${esc(p.id)}">Save</button></div></div>
-          <div class="field" style="flex:1;min-width:120px"><span class="lab">On the Sell screen</span><button class="btn small ghost" type="button" data-dohide="${esc(p.id)}">${p.hidden ? "Show it again" : "Hide it"}</button></div></div>
-          <div class="field"><span class="lab">Count how many are left?</span><button class="btn small ghost" type="button" data-dotrack="${esc(p.id)}">${tracked ? "Stop tracking stock" : "Start tracking stock"}</button></div>` : ""}
-          <div class="row end"><button class="btn small ghost" type="button" data-editdone>Close</button></div>
-        </div>`;
-      } else {
-        h += `<div class="item"><div class="main"><div class="title">${esc(p.name)}${p.hidden ? ` <span class="pill">hidden</span>` : ""}</div><div class="sub num">${money(p.price)} each${canManage() ? (S.costs[p.id] != null ? ` · costs ${money2(S.costs[p.id])} · ${money2(num(p.price) - S.costs[p.id])} profit each` : " · cost not set") : ""}${!tracked ? " · stock not tracked" : n <= 0 ? " · restock needed" : n <= LOW ? " · running low" : ""}</div></div>
+      h += `<div class="item"><div class="main"><div class="title">${esc(p.name)}${p.hidden ? ` <span class="pill">hidden</span>` : ""}</div><div class="sub num">${money(p.price)} each${p.case_size ? ` · ${p.case_size} per ${packWord(p)}` : ""}${canManage() ? (S.costs[p.id] != null ? ` · costs ${money2(S.costs[p.id])} · ${money2(num(p.price) - S.costs[p.id])} profit each` : " · cost not set") : ""}${!tracked ? " · stock not tracked" : n <= 0 ? " · restock needed" : n <= LOW ? " · running low" : ""}</div></div>
           ${tracked ? `<div class="stockn num ${cls}">${n}</div>` : ""}<button class="btn small ghost" type="button" data-edit="${esc(p.id)}" aria-label="Update ${esc(p.name)}">Update</button></div>`;
-      }
     }
     h += `</div></section>`;
   }
@@ -764,13 +770,120 @@ function viewStock(){
   return h;
 }
 
+// Update one product: add new stock, correct the count, or (owners and partners) change its details.
+// Each part has its own Save button, so it's always clear what gets saved.
+function productSheet(id){
+  const p = productById(id); if (!p) return;
+  const tracked = p.track_stock !== false, n = S.stock[p.id] || 0, mgr = canManage(), cost = S.costs[p.id];
+  let hidden = !!p.hidden, track = tracked;
+  let byCase = !!p.case_size && store.get("busynes.bycase." + p.id) !== "0";
+  let W = packWord(p);
+  openSheet(`<div class="grab"></div><h2>${esc(p.name)}</h2>
+    <p class="muted" style="margin:-10px 0 0">${tracked ? `<b class="num">${n}</b> in stock` : "Stock isn't counted for this item"} · ${money(p.price)} each${mgr && cost != null ? ` · costs you ${money2(cost)}` : ""}</p>
+    ${tracked ? `<section class="card"><div class="eyebrow">Add new stock</div>
+      <div class="field" style="margin-top:8px"><span class="lab">Bought as</span><div class="chips"><button type="button" class="chip" data-addby="item" aria-pressed="${!byCase}">Single items</button><button type="button" class="chip" data-addby="case" aria-pressed="${byCase}">${cap(plural(W, 2))}</button></div></div>
+      <div class="field" id="caseBox" style="margin-top:10px"${byCase ? "" : " hidden"}><label for="addSize" id="addSizeLab">How many items in one ${W}?</label><input id="addSize" class="text num" type="number" inputmode="numeric" min="2" max="1000" step="1" placeholder="e.g. 12" value="${p.case_size || ""}">
+        ${mgr ? `<label for="addPack" style="margin-top:10px">What do you call it? (case, box, bag, pack...)</label><input id="addPack" class="text" maxlength="20" list="packNames" placeholder="pack" value="${esc(p.pack_name || "")}">${PACK_LIST}` : ""}</div>
+      <div class="field" style="margin-top:10px"><label for="addQty" id="addQtyLab"></label><input id="addQty" class="text num" type="number" inputmode="numeric" min="1" step="1" placeholder="e.g. 2"></div>
+      ${mgr ? `<div class="field" style="margin-top:10px"><label for="addCost" id="addCostLab"></label><input id="addCost" class="text num" type="number" inputmode="decimal" min="0" step="0.01" placeholder="${cost != null ? cost : "e.g. 25"}"></div>` : ""}
+      <p class="banner" id="addSum" style="margin:10px 0 0" hidden></p>
+      <button class="btn" type="button" id="saveAdd" style="margin-top:12px;width:100%">Save new stock</button></section>
+    <section class="card"><div class="eyebrow">Count what's left</div>
+      <p class="muted" style="margin:6px 0 0;font-size:13px">If ${n} is wrong, count what you really have and enter it here.</p>
+      <div class="field" style="margin-top:8px"><label for="countQty">How many are there now?</label><input id="countQty" class="text num" type="number" inputmode="numeric" min="0" step="1" placeholder="${Math.max(n, 0)}"></div>
+      <button class="btn ghost" type="button" id="saveCount" style="margin-top:12px;width:100%">Save count</button></section>` : ""}
+    ${mgr ? `<section class="card"><div class="eyebrow">Product details</div>
+      <div class="field" style="margin-top:8px"><label for="nameIn">Name</label><input id="nameIn" class="text" maxlength="40" value="${esc(p.name)}"></div>
+      <div class="row" style="margin-top:10px;align-items:flex-start">
+        <div class="field" style="flex:1;min-width:120px"><label for="priceIn">Selling price (${cur()})</label><input id="priceIn" class="text num" type="number" inputmode="decimal" min="0" step="1" value="${num(p.price)}"></div>
+        <div class="field" style="flex:1;min-width:120px"><label for="costIn">One item costs you (${cur()})</label><input id="costIn" class="text num" type="number" inputmode="decimal" min="0" step="0.01" placeholder="not set" value="${cost != null ? cost : ""}"></div></div>
+      <p class="banner bad" id="costWarn" style="margin:10px 0 0" hidden>The cost is more than the selling price. If you bought a whole pack, this box needs the cost of <b>one item</b>: add the stock as a pack above and it's worked out for you.</p>
+      <div class="field" style="margin-top:10px"><label for="caseIn">Items in a pack (optional)</label><input id="caseIn" class="text num" type="number" inputmode="numeric" min="2" max="1000" step="1" placeholder="e.g. 12 or 20" value="${p.case_size || ""}">
+        <span class="muted" style="font-size:13px">Only if you buy it in packs, like a case of cider or a pack of 20 Russians.</span></div>
+      <div class="field" style="margin-top:10px"><label for="packIn">What do you call a pack? (optional)</label><input id="packIn" class="text" maxlength="20" list="packNames" placeholder="pack" value="${esc(p.pack_name || "")}"></div>
+      <div class="field" style="margin-top:10px"><span class="lab">Show it on the Sell screen?</span><div class="chips"><button type="button" class="chip" data-pdhidden="no" aria-pressed="${!hidden}">Yes</button><button type="button" class="chip" data-pdhidden="yes" aria-pressed="${hidden}">No, hide it</button></div></div>
+      <div class="field" style="margin-top:10px"><span class="lab">Count how many are left?</span><div class="chips"><button type="button" class="chip" data-pdtrack="yes" aria-pressed="${track}">Yes</button><button type="button" class="chip" data-pdtrack="no" aria-pressed="${!track}">No (made to order)</button></div></div>
+      <button class="btn" type="button" id="pdSave" style="margin-top:12px;width:100%">Save changes</button></section>` : ""}
+    <button class="btn ghost" type="button" id="sheetCancel">Close</button>`);
+  $("#sheetCancel").onclick = closeSheet;
+  // Adding stock: by single items, or by the case (the app works out the items and the cost of one).
+  const calcAdd = () => {
+    const n = parseInt($("#addQty").value, 10), size = byCase ? parseInt($("#addSize").value, 10) : 1;
+    const rawC = $("#addCost") ? parseFloat($("#addCost").value) : NaN;
+    const items = n >= 1 && size >= 1 ? n * size : 0, unit = rawC >= 0 && size >= 1 ? Math.round(rawC / size * 100) / 100 : null;
+    return {n, size, items, unit, rawC};
+  };
+  const syncAdd = () => {
+    if (!$("#addQty")) return;
+    W = (($("#addPack") && $("#addPack").value) || "").trim().toLowerCase() || packWord(p);
+    $("#addQtyLab").textContent = byCase ? `How many ${plural(W, 2)} came in?` : "How many came in?";
+    if ($("#addCostLab")) $("#addCostLab").textContent = `What did ${byCase ? "a whole " + W : "each one"} cost you? (optional, ${cur()})`;
+    $("#addSizeLab").textContent = `How many items in one ${W}?`;
+    const chip = document.querySelector('[data-addby="case"]'); if (chip) chip.textContent = cap(plural(W, 2));
+    $("#caseBox").hidden = !byCase;
+    const {n, size, items, unit, rawC} = calcAdd(), box = $("#addSum");
+    let msg = "", bad = false;
+    if (items) msg = byCase ? `${n} ${plural(W, n)} × ${size} = <b>${items} items</b> added to stock.` : `<b>${items}</b> added to stock.`;
+    if (items && unit != null) msg += ` That's <b>${money2(unit)} each</b>${byCase ? ` (${money2(rawC)} ÷ ${size})` : ""}.`;
+    if (unit != null && unit > num(p.price) + 0.005){ bad = true; msg += `<br>That's more than you sell one for (${money2(p.price)}).${byCase ? ` Check the number of items in a ${W}.` : ` If this is the price of a whole pack, choose ${cap(plural(W, 2))} above.`}`; }
+    box.hidden = !msg; box.innerHTML = msg; box.classList.toggle("bad", bad);
+  };
+  document.querySelectorAll("[data-addby]").forEach(b => b.onclick = () => {
+    byCase = b.dataset.addby === "case"; store.set("busynes.bycase." + p.id, byCase ? "1" : "0");
+    document.querySelectorAll("[data-addby]").forEach(x => x.setAttribute("aria-pressed", String(x === b))); syncAdd();
+  });
+  ["#addQty", "#addCost", "#addSize", "#addPack"].forEach(sel => { const el = $(sel); if (el) el.oninput = syncAdd; });
+  syncAdd();
+  const sa = $("#saveAdd");
+  if (sa) sa.onclick = () => once(sa, async () => {
+    const {n, size, items, unit} = calcAdd();
+    if (!(n >= 1)) return toast(byCase ? `Enter how many ${plural(W, 2)} came in.` : "Enter how many came in.");
+    if (byCase && !(size >= 2 && size <= 1000)) return toast(`Enter how many items are in one ${W} (2 to 1000).`);
+    const newName = (($("#addPack") && $("#addPack").value) || "").trim().toLowerCase();
+    const rememberSize = byCase && mgr && (size !== p.case_size || (newName && newName !== (p.pack_name || "")));
+    await stockMove(p.id, "add", String(items), unit != null ? String(unit) : "");
+    if (rememberSize) { try { await must(S.sb.rpc("update_product", Object.assign({p_id: p.id, p_case_size: size}, newName ? {p_pack_name: newName} : {}))); await refresh(true); } catch(e){} }
+  });
+  const sc = $("#saveCount"); if (sc) sc.onclick = () => once(sc, () => stockMove(p.id, "count", $("#countQty").value));
+  document.querySelectorAll("[data-pdhidden]").forEach(b => b.onclick = () => { hidden = b.dataset.pdhidden === "yes"; document.querySelectorAll("[data-pdhidden]").forEach(x => x.setAttribute("aria-pressed", String(x === b))); });
+  document.querySelectorAll("[data-pdtrack]").forEach(b => b.onclick = () => { track = b.dataset.pdtrack === "yes"; document.querySelectorAll("[data-pdtrack]").forEach(x => x.setAttribute("aria-pressed", String(x === b))); });
+  const warnCost = () => { const w = $("#costWarn"); if (!w) return; const c = parseFloat($("#costIn").value), pr = parseFloat($("#priceIn").value); w.hidden = !(c > pr); };
+  ["#costIn", "#priceIn"].forEach(sel => { const el = $(sel); if (el) el.oninput = warnCost; });
+  warnCost();
+  const ps = $("#pdSave");
+  if (ps) ps.onclick = () => once(ps, async () => {
+    const name = $("#nameIn").value.trim(), price = parseFloat($("#priceIn").value), rawCost = $("#costIn").value.trim(), c = parseFloat(rawCost);
+    if (!name) return toast("Give it a name.");
+    if (!(price >= 0)) return toast("Enter a selling price.");
+    if (rawCost !== "" && !(c >= 0)) return toast("Enter what it costs you, or leave it empty.");
+    if (rawCost === "" && cost != null) return toast("A cost can be changed, but not removed.");
+    const rawCase = $("#caseIn").value.trim(), caseN = rawCase === "" ? 0 : parseInt(rawCase, 10);
+    if (rawCase !== "" && !(caseN >= 2 && caseN <= 1000)) return toast("A pack holds between 2 and 1000 items, or leave it empty.");
+    const patch = {}, packN = $("#packIn").value.trim().toLowerCase();
+    if ((p.case_size || 0) !== caseN) patch.p_case_size = caseN;
+    if (packN !== (p.pack_name || "")) patch.p_pack_name = packN;
+    if (name !== p.name) patch.p_name = name;
+    if (price !== num(p.price)) patch.p_price = price;
+    if (rawCost !== "" && c !== cost) patch.p_cost = c;
+    if (hidden !== !!p.hidden) patch.p_hidden = hidden;
+    if (track !== tracked) patch.p_track = track;
+    if (!Object.keys(patch).length) return toast("Nothing has changed.");
+    try { await must(S.sb.rpc("update_product", Object.assign({p_id: p.id}, patch))); closeSheet(); toast("Saved."); await refresh(); }
+    catch(err){ failed(err); }
+  });
+}
+
 function newProductSheet(){
   const os = Object.values(owners()), multi = os.length > 1;
   openSheet(`<div class="grab"></div><h2>Add a product</h2>
     <div class="field"><label for="npName">Name</label><input id="npName" class="text" maxlength="40" placeholder="e.g. Cheese burger"></div>
     <div class="field"><label for="npPrice">Selling price (${cur()})</label><input id="npPrice" class="text num" type="number" inputmode="decimal" min="0" step="1"></div>
-    <div class="field"><label for="npCost">What it costs you (${cur()}, optional)</label><input id="npCost" class="text num" type="number" inputmode="decimal" min="0" step="0.01" placeholder="e.g. 25">
-      <span class="muted" style="font-size:13px">So BusyNes can work out your profit. You can add it later.</span></div>
+    <div class="field"><label for="npCase">Items in a pack (only if you buy it in packs)</label><input id="npCase" class="text num" type="number" inputmode="numeric" min="2" max="1000" step="1" placeholder="e.g. 12 or 20">
+      <span class="muted" style="font-size:13px">For example a case of cider (12) or a pack of 20 Russians.</span></div>
+    <div class="field" id="npPackBox" hidden><label for="npPack">What do you call it? (case, box, bag, pack...)</label><input id="npPack" class="text" maxlength="20" list="packNames" placeholder="pack">${PACK_LIST}</div>
+    <div class="field"><label for="npCost" id="npCostLab">What it costs you (${cur()}, optional)</label><input id="npCost" class="text num" type="number" inputmode="decimal" min="0" step="0.01" placeholder="e.g. 25">
+      <span class="muted" style="font-size:13px" id="npCostHelp">So BusyNes can work out your profit. You can add it later.</span></div>
+    <p class="banner" id="npSum" hidden></p>
     ${multi ? `<div class="field"><span class="lab">Whose stock is it?</span><div class="chips">${os.map((o,i) => `<button type="button" class="chip" data-npowner="${esc(o.id)}" aria-pressed="${i===0}">${esc(o.name)}</button>`).join("")}</div></div>` : ""}
     <div class="field"><span class="lab">Count how many are left?</span><div class="chips"><button type="button" class="chip" data-nptrack="yes" aria-pressed="true">Yes, track stock</button><button type="button" class="chip" data-nptrack="no" aria-pressed="false">No (made to order)</button></div></div>
     <div class="row"><button class="btn ghost" type="button" id="sheetCancel">Cancel</button><span class="spacer"></span><button class="btn" type="button" id="npSave">Add product</button></div>`);
@@ -778,24 +891,67 @@ function newProductSheet(){
   document.querySelectorAll("[data-npowner]").forEach(b => b.onclick = () => { owner = b.dataset.npowner; document.querySelectorAll("[data-npowner]").forEach(x => x.setAttribute("aria-pressed", String(x===b))); });
   document.querySelectorAll("[data-nptrack]").forEach(b => b.onclick = () => { track = b.dataset.nptrack === "yes"; document.querySelectorAll("[data-nptrack]").forEach(x => x.setAttribute("aria-pressed", String(x===b))); });
   $("#sheetCancel").onclick = closeSheet;
+  const npCalc = () => {
+    const size = parseInt($("#npCase").value, 10), raw = parseFloat($("#npCost").value), price = parseFloat($("#npPrice").value);
+    const bySize = size >= 2 && size <= 1000;
+    return {size: bySize ? size : null, unit: raw >= 0 ? (bySize ? Math.round(raw / size * 100) / 100 : raw) : null, raw, price};
+  };
+  const npSync = () => {
+    const {size, unit, raw, price} = npCalc(), box = $("#npSum");
+    const w = ($("#npPack").value || "").trim().toLowerCase() || "pack";
+    $("#npPackBox").hidden = !size;
+    $("#npCostLab").textContent = size ? `What does one whole ${w} cost you? (${cur()}, optional)` : `What it costs you (${cur()}, optional)`;
+    let msg = "", bad = false;
+    if (size && unit != null) msg = `${money2(raw)} ÷ ${size} = <b>${money2(unit)} each</b>.`;
+    if (unit != null && price >= 0 && unit > price + 0.005){ bad = true; msg += `${msg ? "<br>" : ""}That's more than the selling price. ${size ? `Check the number of items in a ${w}.` : "If this is the price of a whole pack, enter how many items are in it above."}`; }
+    box.hidden = !msg; box.innerHTML = msg; box.classList.toggle("bad", bad);
+  };
+  ["#npCase", "#npCost", "#npPrice", "#npPack"].forEach(sel => { $(sel).oninput = npSync; });
   $("#npSave").onclick = async e => {
     const name = $("#npName").value.trim(), price = parseFloat($("#npPrice").value);
     if (!name || !(price >= 0)) { toast("Give it a name and a price."); return; }
+    const rawCase = $("#npCase").value.trim();
+    if (rawCase !== "" && !(parseInt(rawCase, 10) >= 2 && parseInt(rawCase, 10) <= 1000)) { toast("A pack holds between 2 and 1000 items, or leave it empty."); return; }
     e.target.disabled = true;
-    try { const cost = parseFloat($("#npCost").value);
-      await must(S.sb.rpc("add_product", Object.assign({p_biz: bid(), p_name: name, p_price: price, p_group: owner, p_track: track}, cost >= 0 ? {p_cost: cost} : {}))); closeSheet(); toast(name + " added."); await refresh(); }
+    try { const {size, unit} = npCalc();
+      await must(S.sb.rpc("add_product", Object.assign({p_biz: bid(), p_name: name, p_price: price, p_group: owner, p_track: track}, unit != null ? {p_cost: unit} : {}, size ? Object.assign({p_case_size: size}, $("#npPack").value.trim() ? {p_pack_name: $("#npPack").value.trim().toLowerCase()} : {}) : {}))); closeSheet(); toast(name + " added."); await refresh(); }
     catch(err){ e.target.disabled = false; failed(err); }
   };
 }
 
 // ---------- sales ----------
+// Does this sale match what was typed? Every word must appear somewhere: items, customer note, who sold it,
+// who got the money, the day, or the amount.
+function saleMatches(s, q){
+  const items = s.items || [], priced = items.filter(i => i.price != null);
+  const amount = s.whole && s.total != null ? num(s.total) : priced.reduce((x, i) => x + num(i.price) * i.qty, 0);
+  const hay = [items.map(i => i.name).join(" "), s.note || "", pname(s.recorded_by), Pname(s.paid_to), dayLabel(s.at), s.method === "cash" ? "cash" : "account transfer",
+    amount ? String(amount) : "", amount ? money(amount) : ""].join(" ").toLowerCase();
+  return q.toLowerCase().split(/\s+/).filter(Boolean).every(w => hay.includes(w));
+}
+function saleOwes(s){ return s.whole && s.total != null && s.paid != null ? num(s.total) - num(s.paid) : 0; }
 function viewSales(){
   const mine = x => x.paid_to === S.me || x.recorded_by === S.me;
-  const list = S.salesFilter === "mine" ? S.sales.filter(mine) : S.sales;
+  const base = S.salesFilter === "mine" ? S.sales.filter(mine) : S.sales;
+  const since = {today: new Date().setHours(0,0,0,0), week: Date.now() - 7*864e5, month: Date.now() - 30*864e5}[S.speriod];
+  const q = (S.sq || "").trim();
+  const list = base.filter(s => (!since || new Date(s.at).getTime() >= since) && (S.smethod === "all" || s.method === (S.smethod === "cash" ? "cash" : "transfer"))
+    && (S.sstatus === "all" || saleOwes(s) > 0.005) && (!q || saleMatches(s, q)));
+  const filtering = !!q || S.speriod !== "all" || S.smethod !== "all" || S.sstatus !== "all";
+  const chips = (key, attr, opts) => `<div class="chips seg" role="group">${opts.map(([k,l]) => `<button type="button" class="chip" data-${attr}="${k}" aria-pressed="${S[key]===k}">${l}</button>`).join("")}</div>`;
   let h = `<h2>Sales</h2><p class="muted" style="margin:-12px 0 0">Everything that's been sold, newest first: what, when, who sold it and where the money went. Amounts only show for your own products and for sales you handled${S.biz.privacy === "shared" && canManage() ? ", plus everything else if you're an owner or partner" : ""}.</p>
-    <div class="chips" role="group">${[["all","Everyone's"],["mine","Mine"]].map(([k,l]) => `<button type="button" class="chip" data-sfilter="${k}" aria-pressed="${S.salesFilter===k}">${l}</button>`).join("")}</div>`;
+    <div class="chips" role="group">${[["all","Everyone's"],["mine","Mine"]].map(([k,l]) => `<button type="button" class="chip" data-sfilter="${k}" aria-pressed="${S.salesFilter===k}">${l}</button>`).join("")}</div>
+    <input id="salesSearch" class="text" type="search" placeholder="Search: item, customer, person, amount..." aria-label="Search sales" autocomplete="off" value="${esc(S.sq || "")}">
+    ${chips("speriod", "speriod", [["all","Any time"],["today","Today"],["week","7 days"],["month","30 days"]])}
+    ${chips("smethod", "smethod", [["all","Cash + account"],["cash","Cash"],["transfer","Account"]])}
+    ${chips("sstatus", "sstatus", [["all","All sales"],["owing","Still owing"]])}`;
   h += offlineBanner();
-  if (!list.length) return h + `<div class="empty"><b>No sales to show yet</b>${S.salesFilter === "mine" ? "Sales you recorded or were paid for will show here." : "Sales recorded by anyone in the business will show here."}</div>`;
+  if (filtering){
+    const total = list.reduce((x, s) => { const it = (s.items || []).filter(i => i.price != null); return x + (s.whole && s.total != null ? num(s.total) : it.reduce((y, i) => y + num(i.price) * i.qty, 0)); }, 0);
+    h += `<p class="muted salescount" style="margin:0"><b>${list.length}</b> sale${list.length === 1 ? "" : "s"}${list.length ? " · " + money2(total) : ""} <button class="linkbtn" type="button" data-sclear>Clear search</button></p>`;
+  }
+  if (!list.length) return h + (filtering ? `<div class="empty"><b>No sales match</b>Try a different word, or clear the search.</div>`
+    : `<div class="empty"><b>No sales to show yet</b>${S.salesFilter === "mine" ? "Sales you recorded or were paid for will show here." : "Sales recorded by anyone in the business will show here."}</div>`);
   let cur = "";
   for (const s of list){
     const k = dayKey(s.at);
@@ -820,15 +976,14 @@ function viewSales(){
 // ---------- my money ----------
 function viewReport(){
   const m = S.money || {received:0, received_cash:0, due:0, sold:[], pays:[], orders:0};
-  const periods = [["settle","Since last settle-up"],["today","Today"],["week","This week"],["all","All time"]];
-  let h = `<h2>My money</h2><div class="chips">${periods.map(([k,l]) => `<button type="button" class="chip" data-period="${k}" aria-pressed="${S.period===k}">${l}</button>`).join("")}</div>`;
+  const periods = [["settle","Since settle-up"],["today","Today"],["week","Week"],["all","All time"]];
+  let h = `<h2>My money</h2><div class="chips seg">${periods.map(([k,l]) => `<button type="button" class="chip" data-period="${k}" aria-pressed="${S.period===k}">${l}</button>`).join("")}</div>`;
   if (S.period === "settle") h += `<p class="muted" style="margin:-8px 0 0">${S.settlements[0] ? "Counting from the settle-up on " + dayLabel(S.settlements[0].at) + " at " + timeLabel(S.settlements[0].at) + "." : "No settle-ups yet, so this counts every sale."}</p>`;
 
   const received = num(m.received), cash = num(m.received_cash), due = num(m.due), diff = Math.round((received - due)*100)/100;
   h += `<div class="kpis">
     <div class="kpi"><span class="eyebrow">Money you received</span><b class="num">${money2(received)}</b><span class="muted num">${money(cash)} cash · ${money(received - cash)} account</span></div>
     <div class="kpi"><span class="eyebrow">Your share collected</span><b class="num">${money2(due)}</b><span class="muted num">${money(m.sold_value != null ? m.sold_value : due)} of your stock sold${num(m.fees) > 0.005 ? " · " + money2(m.fees) + " loan fees" : ""}</span></div></div>`;
-  h += profitCard();
   if (num(m.outstanding) > 0.005) h += `<section class="card statement">Customers still owe <b class="num">${money2(m.outstanding)}</b> on your products and loan fees. It counts here once they pay.</section>`;
   h += `<section class="card statement">${diff > 0 ? `You're holding <b class="num">${money2(diff)}</b> that belongs to the others.`
        : diff < 0 ? `The others are holding <b class="num">${money2(-diff)}</b> of your money.`
@@ -840,6 +995,7 @@ function viewReport(){
   if (m.pays.some(p => (p.from_ids || []).length > 1 || (p.to_ids || []).length > 1)) h += `<p class="muted" style="margin:10px 0 0;font-size:13px">Partners who run the same stock together settle as one, so it doesn't matter which of them gets the money.</p>`;
   h += `<div class="row" style="margin-top:12px"><button class="btn ghost small" type="button" data-copyreport>Copy my settle-up</button><span class="spacer"></span>${canManage() ? `<button class="btn small" type="button" data-settle>Mark as settled</button>` : ""}</div></section>`;
 
+  h += profitCard();
   const sold = m.sold || [];
   if (sold.length){
     const max = Math.max(...sold.map(p => num(p.amount)));
@@ -875,7 +1031,7 @@ function profitCard(){
   if (prods.length){
     h += `<div class="eyebrow" style="margin:16px 0 4px">By product</div><div class="list">` + prods.map(r => {
       const has = r.costed, pr = num(r.profit), loss = has && pr < -0.005;
-      return `<div class="item"><div class="main"><div class="title">${esc(r.name)}</div><div class="sub num">${r.qty} sold · ${money2(r.revenue)}${loss ? " · selling below cost" : ""}</div></div>
+      return `<div class="item"><div class="main"><div class="title">${esc(r.name)}</div><div class="sub num">${r.qty} sold · ${money2(r.revenue)}${loss ? " · selling below cost (is the cost per pack, not per item?)" : ""}</div></div>
         <div class="num ${loss ? "bad-text" : ""}" style="font-weight:700">${has ? money2(pr) : `<span class="muted" style="font-weight:500">no cost</span>`}</div></div>`;
     }).join("") + `</div>`;
   }
@@ -965,6 +1121,7 @@ function memberRow(m){
   return `<div class="item"><div class="main"><div class="title">${esc(m.name)}${m.id === S.me ? ` <span class="muted">(you)</span>` : ""}</div>
     <div class="sub">${esc(ROLE_NAME[m.role] || "")}${m.status === "invited" ? " · invited, hasn't joined yet" : ""}${owner && m.email ? " · " + esc(m.email) : ""}</div></div>
     ${owner && m.role !== "owner" ? `<select class="text" style="width:auto" data-setrole="${esc(m.id)}" aria-label="Role of ${esc(m.name)}">${["partner","staff","delivery"].map(r => `<option value="${r}" ${m.role === r ? "selected" : ""}>${ROLE_NAME[r]}</option>`).join("")}</select>
+      <button class="linkbtn" type="button" data-emember="${esc(m.id)}">${m.status === "invited" ? "Edit / resend" : "Edit"}</button>
       <button class="linkbtn bad" type="button" data-rmember="${esc(m.id)}">Remove</button>` : ""}</div>`;
 }
 function groupCard(g){
@@ -1087,14 +1244,56 @@ function inviteSheet(){
     } catch(err){ $("#ivErr").textContent = (err && err.message) || "That didn't work."; }
   });
 }
-function inviteDoneSheet(email, name, r){
-  const msg = `Hi ${name}! I've added you to "${S.biz.name}" on BusyNes as ${ROLE_NAME[r].toLowerCase()}.\n\n1. Open ${appLink()}\n2. Tap "Create my login" using THIS email: ${email} (if you already have a BusyNes login, just sign in)\n3. Confirm your email from the message we send you, then sign in. "${S.biz.name}" will be waiting for you.`;
-  openSheet(`<div class="grab"></div><h2>Invitation saved</h2>
+function inviteDoneSheet(email, name, r, again){
+  const msg = `Hi ${name}! I've added you to "${S.biz.name}" on BusyNes as ${ROLE_NAME[r].toLowerCase()}.\n\n1. Open ${appLink()}\n2. Tap "Create account" using THIS email: ${email} (if you already have a BusyNes login, just log in)\n3. Confirm your email from the message we send you, then log in. "${S.biz.name}" will be waiting for you.`;
+  openSheet(`<div class="grab"></div><h2>${again ? "Send the invitation again" : "Invitation saved"}</h2>
     <p>${esc(name)} will see ${esc(S.biz.name)} as soon as they sign up or sign in with <b>${esc(email)}</b>. Send them this message:</p>
     <textarea class="text" rows="9" readonly id="ivMsg">${esc(msg)}</textarea>
-    <div class="row"><button class="btn ghost" type="button" id="sheetCancel">Done</button><span class="spacer"></span><button class="btn" type="button" id="ivCopy">Copy message</button></div>`);
+    <div class="row" style="gap:8px;flex-wrap:wrap"><a class="btn" id="ivWa" target="_blank" rel="noopener" href="https://wa.me/?text=${encodeURIComponent(msg)}">WhatsApp</a>
+      <a class="btn ghost" id="ivMail" href="mailto:${encodeURIComponent(email)}?subject=${encodeURIComponent("Join " + S.biz.name + " on BusyNes")}&body=${encodeURIComponent(msg)}">Email</a>
+      <button class="btn ghost" type="button" id="ivCopy">Copy message</button></div>
+    <button class="btn ghost" type="button" id="sheetCancel" style="margin-top:10px;width:100%">Done</button>`);
   $("#sheetCancel").onclick = closeSheet;
   $("#ivCopy").onclick = () => copyText(msg, "Copied. Send it to " + name + ".");
+}
+// Change an invited person's details, send the invitation again, or cancel it.
+function memberSheet(m){
+  const invited = m.status === "invited";
+  openSheet(`<div class="grab"></div><h2>${esc(m.name)}</h2>
+    <p class="muted" style="margin:-10px 0 0">${esc(ROLE_NAME[m.role] || "")}${invited ? " · invited, hasn't joined yet" : " · joined"}</p>
+    <div class="field"><label for="emName">Name</label><input id="emName" class="text" maxlength="40" value="${esc(m.name)}"></div>
+    ${invited ? `<div class="field"><label for="emEmail">Email they will sign up with</label><input id="emEmail" class="text" type="email" autocomplete="off" value="${esc(m.email || "")}">
+      <span class="muted" style="font-size:13px">Typed it wrong? Fix it here, then send the invitation again.</span></div>`
+      : `<p class="muted" style="font-size:13px">${m.email ? "Email: " + esc(m.email) + ". " : ""}They have joined, so their email is their login and can't be changed here.</p>`}
+    <div class="err" id="emErr" role="alert" style="color:var(--bad);font-weight:600;min-height:1.4em"></div>
+    <button class="btn" type="button" id="emSave" style="width:100%">Save changes</button>
+    ${invited ? `<button class="btn ghost" type="button" id="emResend" style="width:100%;margin-top:8px">Send the invitation again</button>` : ""}
+    <button class="btn ghost" type="button" id="sheetCancel" style="width:100%;margin-top:8px">Close</button>`);
+  $("#sheetCancel").onclick = closeSheet;
+  const read = () => ({name: $("#emName").value.trim(), email: invited ? $("#emEmail").value.trim() : (m.email || "")});
+  const save = async () => {
+    const v = read(), patch = {p_biz: bid(), p_member: m.id};
+    if (!v.name) { $("#emErr").textContent = "Give them a name."; return null; }
+    if (invited && !v.email) { $("#emErr").textContent = "Type their email address."; return null; }
+    if (v.name !== m.name) patch.p_name = v.name;
+    if (invited && v.email.toLowerCase() !== (m.email || "").toLowerCase()) patch.p_email = v.email;
+    if (Object.keys(patch).length > 2){
+      try { await must(S.sb.rpc("update_member", patch)); await Promise.all([loadMembers(), refresh(true)]); }
+      catch(err){ $("#emErr").textContent = (err && err.message) || "That didn't work."; return null; }
+    }
+    return Object.keys(patch).length > 2;
+  };
+  $("#emSave").onclick = e => once(e.target, async () => {
+    const changed = await save(); if (changed === null) return;
+    closeSheet(); toast(changed ? "Saved." : "Nothing has changed."); render();
+  });
+  const rs = $("#emResend");
+  if (rs) rs.onclick = e => once(e.target, async () => {
+    const changed = await save(); if (changed === null) return;
+    const now = (S.members || []).find(x => x.id === m.id) || m;
+    if (now.status !== "invited"){ closeSheet(); toast(now.name + " already has a login, so they were added straight away."); render(); return; }
+    const v = read(); inviteDoneSheet(v.email, v.name, now.role, true);
+  });
 }
 function editBizSheet(){
   openSheet(`<div class="grab"></div><h2>Edit business</h2>
@@ -1142,31 +1341,9 @@ function bindView(){
   const v = $("#view");
   v.querySelectorAll("[data-add]").forEach(b => b.onclick = () => { const id = b.dataset.add; S.cart[id] = (S.cart[id]||0) + 1; render(); });
   v.querySelectorAll("[data-sub]").forEach(b => b.onclick = () => { const id = b.dataset.sub; S.cart[id] = Math.max(0,(S.cart[id]||0) - 1); if (!S.cart[id]) delete S.cart[id]; render(); });
-  v.querySelectorAll("[data-edit]").forEach(b => b.onclick = () => { S.editing = b.dataset.edit; render(); });
-  v.querySelectorAll("[data-editdone]").forEach(b => b.onclick = () => { S.editing = null; render(); });
+  v.querySelectorAll("[data-edit]").forEach(b => b.onclick = () => productSheet(b.dataset.edit));
   v.querySelectorAll("[data-newprod]").forEach(b => b.onclick = newProductSheet);
-  v.querySelectorAll("[data-doadd]").forEach(b => b.onclick = () => once(b, () => stockMove(b.dataset.doadd, "add", $("#addQty").value, $("#addCost") ? $("#addCost").value : "")));
-  v.querySelectorAll("[data-docount]").forEach(b => b.onclick = () => once(b, () => stockMove(b.dataset.docount, "count", $("#countQty").value)));
-  const updateProduct = async (id, patch, msg) => { try { await must(S.sb.rpc("update_product", Object.assign({p_id: id}, patch))); if (msg) toast(msg); await refresh(); } catch(err){ failed(err); } };
-  v.querySelectorAll("[data-doprice]").forEach(b => b.onclick = () => once(b, async () => {
-    const price = parseFloat($("#priceIn").value); if (!(price >= 0)) return toast("Enter a price.");
-    await updateProduct(b.dataset.doprice, {p_price: price}, "Price saved.");
-  }));
-  v.querySelectorAll("[data-docost]").forEach(b => b.onclick = () => once(b, async () => {
-    const cost = parseFloat($("#costIn").value); if (!(cost >= 0)) return toast("Enter what it costs you.");
-    await updateProduct(b.dataset.docost, {p_cost: cost}, "Cost saved.");
-  }));
   v.querySelectorAll("[data-gostock]").forEach(b => b.onclick = () => goTab("stock"));
-  v.querySelectorAll("[data-doname]").forEach(b => b.onclick = () => once(b, async () => {
-    const name = $("#nameIn").value.trim(); if (!name) return toast("Give it a name.");
-    await updateProduct(b.dataset.doname, {p_name: name}, "Name saved.");
-  }));
-  v.querySelectorAll("[data-dohide]").forEach(b => b.onclick = () => once(b, async () => {
-    const p = productById(b.dataset.dohide); await updateProduct(p.id, {p_hidden: !p.hidden});
-  }));
-  v.querySelectorAll("[data-dotrack]").forEach(b => b.onclick = () => once(b, async () => {
-    const p = productById(b.dataset.dotrack); await updateProduct(p.id, {p_track: p.track_stock === false}, p.track_stock === false ? "Now tracking stock." : "Stock is no longer tracked.");
-  }));
   v.querySelectorAll("[data-del]").forEach(b => b.onclick = () => { S.confirmDel = Number(b.dataset.del); render(); });
   v.querySelectorAll("[data-nodel]").forEach(b => b.onclick = () => { S.confirmDel = null; render(); });
   v.querySelectorAll("[data-dodel]").forEach(b => b.onclick = () => once(b, async () => {
@@ -1185,6 +1362,11 @@ function bindView(){
     try { await must(S.sb.rpc("claim_order", {p_id: id, p_take: take})); toast(take ? "You're on it. The others have been told." : "Order released."); await refresh(); } catch(err){ failed(err); }
   }));
   v.querySelectorAll("[data-sfilter]").forEach(b => b.onclick = () => { S.salesFilter = b.dataset.sfilter; render(); });
+  v.querySelectorAll("[data-speriod]").forEach(b => b.onclick = () => { S.speriod = b.dataset.speriod; render(); });
+  v.querySelectorAll("[data-smethod]").forEach(b => b.onclick = () => { S.smethod = b.dataset.smethod; render(); });
+  v.querySelectorAll("[data-sstatus]").forEach(b => b.onclick = () => { S.sstatus = b.dataset.sstatus; render(); });
+  v.querySelectorAll("[data-sclear]").forEach(b => b.onclick = () => { S.sq = ""; S.speriod = "all"; S.smethod = "all"; S.sstatus = "all"; render(); });
+  const sq = $("#salesSearch"); if (sq) sq.oninput = () => { S.sq = sq.value; render(); };
   v.querySelectorAll("[data-pay]").forEach(b => b.onclick = () => paySheet(Number(b.dataset.pay)));
   v.querySelectorAll("[data-due]").forEach(b => b.onclick = () => dueSheet(Number(b.dataset.due)));
   v.querySelectorAll("[data-remind]").forEach(b => b.onclick = () => { const d = S.debts.find(x => x.sale_id === Number(b.dataset.remind)); if (d) copyText(reminderText(d), "Copied. Paste it in a message to them."); });
@@ -1194,6 +1376,15 @@ function bindView(){
   v.querySelectorAll("[data-savephone]").forEach(b => b.onclick = () => once(b, async () => {
     try { await must(S.sb.rpc("set_my_phone", {p_phone: $("#myPhone").value})); toast("Number saved."); await refresh(); } catch(err){ failed(err); }
   }));
+  const ss = $("#sellSearch");
+  if (ss){
+    const filter = () => {
+      const q = ss.value.trim().toLowerCase(); S.sellQuery = ss.value;
+      v.querySelectorAll("[data-pname]").forEach(t => { t.hidden = !!q && !t.dataset.pname.includes(q); });
+      v.querySelectorAll("#view section").forEach(sec => { const tiles = sec.querySelectorAll("[data-pname]"); if (tiles.length) sec.hidden = [...tiles].every(t => t.hidden); });
+    };
+    ss.value = S.sellQuery || ""; ss.oninput = filter; filter();
+  }
   const cf = $("#chatForm");
   if (cf) cf.onsubmit = e => {
     e.preventDefault();
@@ -1221,6 +1412,7 @@ function bindView(){
     try { await must(S.sb.rpc("update_member", {p_biz: bid(), p_member: sel.dataset.setrole, p_role: sel.value})); toast("Role changed."); await Promise.all([loadMembers(), refresh(true)]); render(); }
     catch(err){ failed(err); await loadMembers().catch(() => {}); render(); }
   });
+  v.querySelectorAll("[data-emember]").forEach(b => b.onclick = () => { const m = (S.members || []).find(x => x.id === b.dataset.emember); if (m) memberSheet(m); });
   v.querySelectorAll("[data-rmember]").forEach(b => b.onclick = () => {
     const m = (S.members || []).find(x => x.id === b.dataset.rmember); if (!m) return;
     confirmSheet(`Remove ${m.name}?`, "They lose access to this business straight away. Their past sales stay in the records.", "Remove",
@@ -1255,11 +1447,12 @@ function bindView(){
 }
 async function stockMove(pid, kind, raw, rawCost){
   const qty = parseInt(raw, 10);
-  if (!(qty >= (kind === "add" ? 1 : 0))) return toast(kind === "add" ? "Enter how many came in." : "Enter how many are left.");
+  if (!(qty >= (kind === "add" ? 1 : 0))) return toast(kind === "add" ? "Enter how many came in." : "Enter how many there are now.");
+  if (kind === "add" && rawCost && !(parseFloat(rawCost) >= 0)) return toast("Enter what each one cost, or leave it empty.");
   try {
     const cost = kind === "add" ? parseFloat(rawCost) : NaN;
     await must(S.sb.rpc("add_stock_move", Object.assign({p_biz: bid(), p_product: pid, p_kind: kind, p_qty: qty}, cost >= 0 ? {p_cost: cost} : {})));
-    S.editing = null; toast(kind === "add" ? "Added " + qty + "." : "Stock set to " + qty + ".");
+    S.editing = null; closeSheet(); toast(kind === "add" ? "Added " + qty + " to stock." : "Stock set to " + qty + ".");
     await refresh();
   } catch(err){ failed(err); }
 }
@@ -1373,6 +1566,7 @@ async function enter(session){
   if (pushSupported() && Notification.permission === "granted") savePushSubscription(false).catch(() => {});
 }
 function authErr(msg){ $("#authErr").textContent = msg || ""; }
+$("#authShow").onclick = () => { const i = $("#authPass"), show = i.type === "password"; i.type = show ? "text" : "password"; $("#authShow").textContent = show ? "Hide" : "Show"; $("#authShow").setAttribute("aria-pressed", String(show)); };
 
 // ---------- sign-up check (optional: switched on by TURNSTILE_SITE_KEY in config.js) ----------
 const captcha = {key: "", widgets: {}};
@@ -1402,27 +1596,42 @@ function resetCaptcha(sel, onToken){
 const ensureAuthCaptcha = () => { if (captchaOn() && !authCaptchaMounted){ authCaptchaMounted = true; mountCaptcha("#captchaBox", t => { authToken = t; }); } };
 const authOpts = extra => Object.assign({}, extra, captchaOn() ? {captchaToken: authToken} : {});
 const needCheck = () => captchaOn() && !authToken;
-$("#authForm").onsubmit = e => {
-  e.preventDefault();
-  once($("#signInBtn"), async () => {
-    authErr("");
-    if (needCheck()) return authErr("Please complete the check below first.");
-    const {error} = await S.sb.auth.signInWithPassword({email:$("#authEmail").value.trim(), password:$("#authPass").value, options: captchaOn() ? {captchaToken: authToken} : undefined});
-    resetCaptcha("#captchaBox", t => { authToken = t; });
-    if (error) authErr(/invalid/i.test(error.message) ? "That email and password don't match. First time here? Tap Create my login." : error.message);
-  });
-};
-$("#signUpBtn").onclick = () => once($("#signUpBtn"), async () => {
+let authMode = "in";
+function setAuthMode(m, keepMsg){
+  authMode = m; const up = m === "up";
+  $("#modeIn").setAttribute("aria-selected", String(!up)); $("#modeUp").setAttribute("aria-selected", String(up));
+  $("#authHead").textContent = up ? "Create your account" : "Welcome back";
+  $("#authSub").textContent = up ? "Free to try. You can start your own business or join one you were invited to." : "Log in to your business.";
+  $("#authPass").autocomplete = up ? "new-password" : "current-password";
+  $("#authHint").hidden = !up; $("#signInBtn").hidden = up; $("#signUpBtn").hidden = !up; $("#forgotBtn").hidden = up;
+  $("#authSwap").innerHTML = up ? 'Already have an account? <button class="linkbtn" type="button" id="swapBtn">Log in</button>' : 'New to BusyNes? <button class="linkbtn" type="button" id="swapBtn">Create an account</button>';
+  $("#swapBtn").onclick = () => setAuthMode(up ? "in" : "up");
+  if (!keepMsg) authErr("");
+}
+$("#modeIn").onclick = () => setAuthMode("in"); $("#modeUp").onclick = () => setAuthMode("up");
+setAuthMode("in");
+async function doSignIn(){
+  authErr("");
+  if (needCheck()) return authErr("Please complete the check below first.");
+  const {error} = await S.sb.auth.signInWithPassword({email:$("#authEmail").value.trim(), password:$("#authPass").value, options: captchaOn() ? {captchaToken: authToken} : undefined});
+  resetCaptcha("#captchaBox", t => { authToken = t; });
+  if (error) authErr(/invalid/i.test(error.message) ? "That email and password don't match. New here? Tap Create an account." : error.message);
+}
+async function doSignUp(){
   authErr("");
   const email = $("#authEmail").value.trim(), password = $("#authPass").value;
-  if (!email || password.length < 6) return authErr("Type your email and a password of at least 6 characters, then tap Create my login.");
+  if (!email || password.length < 6) return authErr("Type your email and a password of at least 6 characters.");
   // Send the confirmation link back to wherever this copy of the app is running.
   if (needCheck()) return authErr("Please complete the check below first.");
   const {data, error} = await S.sb.auth.signUp({email, password, options: authOpts({emailRedirectTo: location.origin + location.pathname})});
   resetCaptcha("#captchaBox", t => { authToken = t; });
   if (error) return authErr(error.message);
-  if (!data.session) authErr("Check your email for a confirmation link, then come back and sign in.");
-});
+  if (!data.session){ setAuthMode("in", true); authErr("Almost there! We emailed you a confirmation link. Open it, then come back and log in."); }
+}
+$("#authForm").onsubmit = e => {
+  e.preventDefault();
+  if (authMode === "up") once($("#signUpBtn"), doSignUp); else once($("#signInBtn"), doSignIn);
+};
 $("#forgotBtn").onclick = () => once($("#forgotBtn"), async () => {
   authErr("");
   const email = $("#authEmail").value.trim();
