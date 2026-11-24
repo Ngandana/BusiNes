@@ -126,6 +126,10 @@ alter table sales    add column if not exists due_on date;            -- when an
 -- A loan fee is what the lender charges on top of the items. It belongs to fee_to, not to the owners of the items.
 alter table sales    add column if not exists loan_fee numeric(10,2) not null default 0 check (loan_fee >= 0);
 alter table sales    add column if not exists fee_to text references partners(id);
+-- A delivery fee is charged on top of the items for bringing them. Like a loan fee it belongs to fee_to, not to the owners
+-- of the items. extra_fee is everything charged on top (loan fee + delivery fee): the money maths below uses that one.
+alter table sales    add column if not exists delivery_fee numeric(10,2) not null default 0 check (delivery_fee >= 0);
+alter table sales    add column if not exists extra_fee numeric(10,2) generated always as (loan_fee + delivery_fee) stored;
 alter table sales    add column if not exists client_ref uuid;       -- set by the phone, so a sale sent twice (poor signal) is only recorded once
 
 -- Money received against a sale. A sale paid in full has one payment; a sale on credit has
@@ -317,6 +321,12 @@ drop function if exists record_sale(uuid, jsonb, text, text, text, numeric, date
 drop function if exists create_business(text, text, text);
 drop function if exists update_member(uuid, text, text, text);
 drop function if exists update_business(uuid, text, text, text, boolean);
+drop function if exists record_sale(uuid, jsonb, text, text, text, numeric, date, bigint, numeric, text, uuid, timestamptz);
+drop function if exists my_money(uuid, timestamptz);
+drop function if exists my_profit(uuid, timestamptz);
+drop function if exists my_debts(uuid);
+drop function if exists sales_timeline(uuid, int);
+drop function if exists customer_history(uuid, int);
 
 -- ---------------------------------------------------------------- who is who
 -- Used by every rule below. They only ever answer about the signed-in person.
@@ -465,7 +475,7 @@ $$;
 create or replace function sale_outstanding(p_sale bigint) returns numeric
 language sql stable security definer set search_path = busynes as $$
   select coalesce((select sum(price * qty) from sale_items where sale_id = p_sale), 0)
-       + coalesce((select loan_fee from sales where id = p_sale), 0)
+       + coalesce((select extra_fee from sales where id = p_sale), 0)
        - coalesce((select sum(amount) from sale_payments where sale_id = p_sale), 0)
 $$;
 
@@ -875,6 +885,9 @@ language plpgsql security definer set search_path = busynes as $$
 declare me text := my_member(p_biz); my_name text;
 begin
   if not has_role(p_biz, array['owner','partner']) then raise exception 'Only the owner and partners can mark things as settled'; end if;
+  if not exists (select 1 from partners where business_id = p_biz and id <> me and status <> 'removed' and role <> 'delivery') then
+    raise exception 'There is nobody to settle up with yet';
+  end if;
   insert into settlements (business_id, by) values (p_biz, me);
   select name into my_name from partners where id = me;
   perform notify_all(p_biz, 'settle', my_name || ' marked everything as settled', 'Balances start again from zero.', null, me, array['owner','partner','staff']);
@@ -887,10 +900,12 @@ end $$;
 -- p_due:   the date the rest was promised. p_order: an open order this sale fulfils.
 -- p_fee:   a loan fee charged on top of the items. It is added to what the customer owes and belongs
 --          to p_fee_to (default: whoever records the sale), not to the owners of the items.
+-- p_delivery_fee: a delivery fee, treated the same way (added to what the customer owes, belongs to p_fee_to).
 create or replace function record_sale(p_biz uuid, p_items jsonb, p_paid_to text, p_method text, p_note text default '',
                                        p_paid numeric default null, p_due date default null, p_order bigint default null,
                                        p_fee numeric default 0, p_fee_to text default null,
-                                       p_client_ref uuid default null, p_at timestamptz default null)
+                                       p_client_ref uuid default null, p_at timestamptz default null,
+                                       p_delivery_fee numeric default 0)
 returns bigint
 language plpgsql security definer set search_path = busynes as $$
 declare
@@ -903,6 +918,7 @@ declare
   items_total numeric := 0;
   total numeric;
   fee numeric := coalesce(p_fee, 0);
+  del numeric := coalesce(p_delivery_fee, 0);
   fee_who text := coalesce(p_fee_to, my_member(p_biz));
   paid numeric;
   lines text := '';
@@ -935,12 +951,13 @@ begin
     raise exception 'Choose who got the money';
   end if;
   if fee < 0 or fee > 100000 then raise exception 'That loan fee does not look right'; end if;
-  if fee > 0 and not exists (select 1 from partners where id = fee_who and business_id = p_biz and status <> 'removed') then
-    raise exception 'Unknown person for the loan fee';
+  if del < 0 or del > 100000 then raise exception 'That delivery fee does not look right'; end if;
+  if fee + del > 0 and not exists (select 1 from partners where id = fee_who and business_id = p_biz and status <> 'removed') then
+    raise exception 'Unknown person for the fee';
   end if;
   select name into my_name from partners where id = me;
-  insert into sales (business_id, at, paid_to, method, note, recorded_by, loan_fee, fee_to, client_ref)
-    values (p_biz, sale_at, p_paid_to, p_method, cust, me, fee, case when fee > 0 then fee_who end, p_client_ref)
+  insert into sales (business_id, at, paid_to, method, note, recorded_by, loan_fee, delivery_fee, fee_to, client_ref)
+    values (p_biz, sale_at, p_paid_to, p_method, cust, me, fee, del, case when fee + del > 0 then fee_who end, p_client_ref)
     returning id into new_id;
   for it in select * from jsonb_array_elements(p_items) loop
     select * into p from products where id = it ->> 'product_id' and business_id = p_biz;
@@ -951,7 +968,7 @@ begin
     items_total := items_total + p.price * (it ->> 'qty')::int;
     lines := lines || case when lines = '' then '' else ', ' end || (it ->> 'qty') || ' × ' || p.name;
   end loop;
-  total := items_total + fee;
+  total := items_total + fee + del;
 
   paid := coalesce(p_paid, total);
   if paid < 0 or paid > total then raise exception 'The amount paid must be between 0 and the total'; end if;
@@ -1072,22 +1089,49 @@ begin
 end $$;
 
 -- Sales that still have money owing, for the people who may see that sale's money.
--- total includes any loan fee; loan_fee is shown separately.
+-- total includes any loan or delivery fee; those are shown separately.
 create or replace function my_debts(p_biz uuid)
 returns table (sale_id bigint, at timestamptz, customer text, items text, total numeric, paid numeric,
-               outstanding numeric, due_on date, paid_to text, recorded_by text, loan_fee numeric)
+               outstanding numeric, due_on date, paid_to text, recorded_by text, loan_fee numeric, delivery_fee numeric)
 language sql stable security definer set search_path = busynes as $$
   select s.id, s.at, s.note,
          (select string_agg(i.qty || ' × ' || i.name, ', ' order by i.id) from sale_items i where i.sale_id = s.id),
-         t.total + s.loan_fee, coalesce(p.paid, 0), t.total + s.loan_fee - coalesce(p.paid, 0), s.due_on, s.paid_to, s.recorded_by, s.loan_fee
+         t.total + s.extra_fee, coalesce(p.paid, 0), t.total + s.extra_fee - coalesce(p.paid, 0), s.due_on, s.paid_to, s.recorded_by, s.loan_fee, s.delivery_fee
   from sales s
   join lateral (select sum(price * qty) as total from sale_items where sale_id = s.id) t on true
   left join lateral (select sum(amount) as paid from sale_payments where sale_id = s.id) p on true
   where s.business_id = p_biz
     and has_role(p_biz, array['owner','partner','staff'])
     and sees_whole_sale(s.id)
-    and t.total + s.loan_fee - coalesce(p.paid, 0) > 0.005
+    and t.total + s.extra_fee - coalesce(p.paid, 0) > 0.005
   order by s.due_on nulls last, s.at
+$$;
+
+-- Every sale that was ever on credit (not paid in full when it was recorded), whether it is paid off or not, with each
+-- payment and when it came in. The app groups these by customer to show who owed, how much, and how fast they paid.
+-- Same visibility as my_debts: only sales whose money the caller may see. A payment made at the moment of the sale
+-- shares its timestamp with the sale; anything later is the customer paying back.
+create or replace function customer_history(p_biz uuid, p_limit int default 1000)
+returns table (sale_id bigint, at timestamptz, customer text, items text, total numeric, paid numeric,
+               outstanding numeric, due_on date, paid_to text, recorded_by text, loan_fee numeric, delivery_fee numeric,
+               cleared_at timestamptz, payments jsonb)
+language sql stable security definer set search_path = busynes as $$
+  select s.id, s.at, s.note,
+         (select string_agg(i.qty || ' × ' || i.name, ', ' order by i.id) from sale_items i where i.sale_id = s.id),
+         t.total + s.extra_fee, coalesce(p.paid, 0), t.total + s.extra_fee - coalesce(p.paid, 0), s.due_on, s.paid_to, s.recorded_by, s.loan_fee, s.delivery_fee,
+         case when t.total + s.extra_fee - coalesce(p.paid, 0) <= 0.005 then p.last_at end,
+         (select coalesce(jsonb_agg(jsonb_build_object('at', pay.at, 'amount', pay.amount, 'method', pay.method, 'paid_to', pay.paid_to)
+                                    order by pay.at, pay.id), '[]'::jsonb)
+          from sale_payments pay where pay.sale_id = s.id)
+  from sales s
+  join lateral (select sum(price * qty) as total from sale_items where sale_id = s.id) t on true
+  left join lateral (select sum(amount) as paid, max(at) as last_at from sale_payments where sale_id = s.id) p on true
+  where s.business_id = p_biz
+    and has_role(p_biz, array['owner','partner','staff'])
+    and sees_whole_sale(s.id)
+    and t.total + s.extra_fee - coalesce((select sum(amount) from sale_payments where sale_id = s.id and at <= s.at), 0) > 0.005
+  order by s.at desc, s.id desc
+  limit least(greatest(coalesce(p_limit, 1000), 1), 5000)
 $$;
 
 -- The team's sales trail, newest first. Everyone who can sell sees WHAT was sold, WHEN, by WHOM, where the money
@@ -1095,14 +1139,15 @@ $$;
 -- for sales the caller may see the money of (and prices for the caller's own products).
 create or replace function sales_timeline(p_biz uuid, p_limit int default 300)
 returns table (id bigint, at timestamptz, paid_to text, recorded_by text, method text, note text,
-               due_on date, whole boolean, total numeric, paid numeric, loan_fee numeric, items jsonb)
+               due_on date, whole boolean, total numeric, paid numeric, loan_fee numeric, delivery_fee numeric, items jsonb)
 language sql stable security definer set search_path = busynes as $$
   select s.id, s.at, s.paid_to, s.recorded_by, s.method, s.note,
          case when w.whole then s.due_on end,
          w.whole,
-         case when w.whole then t.total + s.loan_fee end,
+         case when w.whole then t.total + s.extra_fee end,
          case when w.whole then coalesce(p.paid, 0) end,
          case when w.whole then s.loan_fee end,
+         case when w.whole then s.delivery_fee end,
          (select jsonb_agg(jsonb_build_object('name', i.name, 'qty', i.qty, 'owner', i.owner,
                   'price', case when w.whole or exists (select 1 from owner_shares os
                                                         where os.owner = i.owner and os.business_id = p_biz
@@ -1272,12 +1317,12 @@ begin
 end $$;
 
 -- ---------------------------------------------------------------- money
--- The signed-in person's own money for a period (p_from = null means all time).
+-- The signed-in person's own money for a period (p_from = null means from the beginning, p_to = null means until now).
 -- Returns only their numbers, plus the settle-up payments they are part of.
 -- Money counts when it is actually collected. Each payment is shared out in proportion to what the sale
 -- was made of: the owners of the items get their share of the items, and whoever charged a loan fee
 -- gets the fee's share. So a credit sale only moves money as the customer pays it back.
-create or replace function my_money(p_biz uuid, p_from timestamptz default null) returns jsonb
+create or replace function my_money(p_biz uuid, p_from timestamptz default null, p_to timestamptz default null) returns jsonb
 language plpgsql stable security definer set search_path = busynes as $$
 declare
   me text := my_member(p_biz);
@@ -1299,15 +1344,15 @@ begin
   from (
     select p.id,
       coalesce((select sum(pay.amount) from sale_payments pay
-                where pay.business_id = p_biz and pay.paid_to = p.id and (p_from is null or pay.at > p_from)), 0)
-      - coalesce((select sum(pay.amount * (coalesce(mv.v, 0) + case when s.fee_to = p.id then s.loan_fee else 0 end) / (tot.v + s.loan_fee))
+                where pay.business_id = p_biz and pay.paid_to = p.id and (p_from is null or pay.at > p_from) and (p_to is null or pay.at <= p_to)), 0)
+      - coalesce((select sum(pay.amount * (coalesce(mv.v, 0) + case when s.fee_to = p.id then s.extra_fee else 0 end) / (tot.v + s.extra_fee))
                   from sale_payments pay
                   join sales s on s.id = pay.sale_id
                   join lateral (select sum(si.price * si.qty) as v from sale_items si where si.sale_id = pay.sale_id) tot on true
                   left join lateral (select sum(si.price * si.qty * os.share) as v from sale_items si
                                      join owner_shares os on os.owner = si.owner and os.partner_id = p.id
                                      where si.sale_id = pay.sale_id) mv on true
-                  where pay.business_id = p_biz and (p_from is null or pay.at > p_from)), 0) as net
+                  where pay.business_id = p_biz and (p_from is null or pay.at > p_from) and (p_to is null or pay.at <= p_to)), 0) as net
     from partners p
     where p.business_id = p_biz and p.status <> 'removed'
   ) x;
@@ -1365,7 +1410,7 @@ begin
     'orders',        count(distinct pay.sale_id))
   into mine
   from sale_payments pay
-  where pay.business_id = p_biz and pay.paid_to = me and (p_from is null or pay.at > p_from);
+  where pay.business_id = p_biz and pay.paid_to = me and (p_from is null or pay.at > p_from) and (p_to is null or pay.at <= p_to);
 
   select coalesce(jsonb_agg(jsonb_build_object('product_id', product_id, 'name', name,
            'qty', qty, 'amount', amount, 'my_share', my_share) order by amount desc), '[]'::jsonb)
@@ -1375,13 +1420,13 @@ begin
            sum(si.price * si.qty) as amount, sum(si.price * si.qty * os.share) as my_share
     from sales s join sale_items si on si.sale_id = s.id
     join owner_shares os on os.owner = si.owner and os.partner_id = me
-    where s.business_id = p_biz and (p_from is null or s.at > p_from)
+    where s.business_id = p_biz and (p_from is null or s.at > p_from) and (p_to is null or s.at <= p_to)
     group by si.product_id
   ) t;
 
   -- my share of the money collected (items + any loan fees that are mine), and the fees part on its own
-  select coalesce(sum(pay.amount * (coalesce(mv.v, 0) + case when s.fee_to = me then s.loan_fee else 0 end) / (tot.v + s.loan_fee)), 0),
-         coalesce(sum(pay.amount * case when s.fee_to = me then s.loan_fee else 0 end / (tot.v + s.loan_fee)), 0)
+  select coalesce(sum(pay.amount * (coalesce(mv.v, 0) + case when s.fee_to = me then s.extra_fee else 0 end) / (tot.v + s.extra_fee)), 0),
+         coalesce(sum(pay.amount * case when s.fee_to = me then s.extra_fee else 0 end / (tot.v + s.extra_fee)), 0)
   into due_me, fees_me
   from sale_payments pay
   join sales s on s.id = pay.sale_id
@@ -1389,10 +1434,10 @@ begin
   left join lateral (select sum(si.price * si.qty * os.share) as v from sale_items si
                      join owner_shares os on os.owner = si.owner and os.partner_id = me
                      where si.sale_id = pay.sale_id) mv on true
-  where pay.business_id = p_biz and (p_from is null or pay.at > p_from);
+  where pay.business_id = p_biz and (p_from is null or pay.at > p_from) and (p_to is null or pay.at <= p_to);
 
   -- my share of what customers still owe (all time, not just this period)
-  select coalesce(sum((tot.v + s.loan_fee - coalesce(pd.v, 0)) * (coalesce(mv.v, 0) + case when s.fee_to = me then s.loan_fee else 0 end) / (tot.v + s.loan_fee)), 0)
+  select coalesce(sum((tot.v + s.extra_fee - coalesce(pd.v, 0)) * (coalesce(mv.v, 0) + case when s.fee_to = me then s.extra_fee else 0 end) / (tot.v + s.extra_fee)), 0)
   into owing
   from sales s
   join lateral (select sum(si.price * si.qty) as v from sale_items si where si.sale_id = s.id) tot on true
@@ -1401,8 +1446,8 @@ begin
                      where si.sale_id = s.id) mv on true
   left join lateral (select sum(amount) as v from sale_payments where sale_id = s.id) pd on true
   where s.business_id = p_biz
-    and tot.v + s.loan_fee - coalesce(pd.v, 0) > 0.005
-    and (mv.v is not null or (s.fee_to = me and s.loan_fee > 0));
+    and tot.v + s.extra_fee - coalesce(pd.v, 0) > 0.005
+    and (mv.v is not null or (s.fee_to = me and s.extra_fee > 0));
 
   return mine || jsonb_build_object(
     'me', me,
@@ -1418,7 +1463,7 @@ end $$;
 -- minus what those items cost. It counts what was SOLD, whether or not the customer has paid yet.
 -- Items sold before a cost was set are left out and reported as missing_revenue. Loan fees collected are shown
 -- separately. Only owners and partners can ask; staff and delivery never see costs or profit.
-create or replace function my_profit(p_biz uuid, p_from timestamptz default null) returns jsonb
+create or replace function my_profit(p_biz uuid, p_from timestamptz default null, p_to timestamptz default null) returns jsonb
 language plpgsql stable security definer set search_path = busynes as $$
 declare
   me text := my_member(p_biz);
@@ -1438,7 +1483,7 @@ begin
     from sales s
     join sale_items si on si.sale_id = s.id
     join owner_shares os on os.owner = si.owner and os.partner_id = me
-    where s.business_id = p_biz and (p_from is null or s.at > p_from)
+    where s.business_id = p_biz and (p_from is null or s.at > p_from) and (p_to is null or s.at <= p_to)
     group by si.product_id
   ) t;
 
@@ -1449,13 +1494,13 @@ begin
   from sales s
   join sale_items si on si.sale_id = s.id
   join owner_shares os on os.owner = si.owner and os.partner_id = me
-  where s.business_id = p_biz and (p_from is null or s.at > p_from);
+  where s.business_id = p_biz and (p_from is null or s.at > p_from) and (p_to is null or s.at <= p_to);
 
-  select coalesce(sum(pay.amount * s.loan_fee / (tot.v + s.loan_fee)), 0) into fees_me
+  select coalesce(sum(pay.amount * s.extra_fee / (tot.v + s.extra_fee)), 0) into fees_me
   from sale_payments pay
-  join sales s on s.id = pay.sale_id and s.fee_to = me and s.loan_fee > 0
+  join sales s on s.id = pay.sale_id and s.fee_to = me and s.extra_fee > 0
   join lateral (select sum(si.price * si.qty) as v from sale_items si where si.sale_id = pay.sale_id) tot on true
-  where pay.business_id = p_biz and (p_from is null or pay.at > p_from);
+  where pay.business_id = p_biz and (p_from is null or pay.at > p_from) and (p_to is null or pay.at <= p_to);
 
   return jsonb_build_object(
     'me', me,
@@ -1505,7 +1550,7 @@ begin
                           'sold_by', (select name from partners where id = t.recorded_by),
                           'money_to', (select name from partners where id = t.paid_to),
                           'method', t.method, 'note', t.note, 'items', t.items, 'total', t.total, 'paid', t.paid,
-                          'loan_fee', t.loan_fee, 'due_on', t.due_on) order by t.at desc, t.id desc), '[]'::jsonb)
+                          'loan_fee', t.loan_fee, 'delivery_fee', t.delivery_fee, 'due_on', t.due_on) order by t.at desc, t.id desc), '[]'::jsonb)
                 from sales_timeline(p_biz, 5000) t),
       'stock_changes', (select coalesce(jsonb_agg(jsonb_build_object('at', m.at, 'product', pr.name, 'kind', m.kind, 'qty', m.qty,
                           'by', (select name from partners where id = m.by)) order by m.at desc), '[]'::jsonb)
@@ -1531,14 +1576,14 @@ grant execute on function
   invite_member(uuid, text, text, text, text, numeric), update_member(uuid, text, text, text, text),
   remove_member(uuid, text), leave_business(uuid), set_group_shares(uuid, text, jsonb), delete_group(uuid, text),
   add_product(uuid, text, numeric, text, boolean, numeric, int, text), update_product(text, text, numeric, boolean, boolean, numeric, int, text),
-  add_stock_move(uuid, text, text, int, numeric), product_costs(uuid), my_profit(uuid, timestamptz),
+  add_stock_move(uuid, text, text, int, numeric), product_costs(uuid), my_profit(uuid, timestamptz, timestamptz),
   stock_levels(uuid), mark_settled(uuid), export_data(uuid),
-  record_sale(uuid, jsonb, text, text, text, numeric, date, bigint, numeric, text, uuid, timestamptz),
+  record_sale(uuid, jsonb, text, text, text, numeric, date, bigint, numeric, text, uuid, timestamptz, numeric),
   record_payment(bigint, numeric, text, text), set_sale_due(bigint, date), delete_sale(bigint),
-  my_debts(uuid), sales_timeline(uuid, int),
+  my_debts(uuid), customer_history(uuid, int), sales_timeline(uuid, int),
   create_order(uuid, text, jsonb, text, timestamptz, boolean, numeric), cancel_order(bigint), claim_order(bigint, boolean),
   send_message(uuid, text), mark_notifications_read(uuid, bigint), ping_partner(text, text), set_my_phone(text),
-  save_push_subscription(text, text, text), remove_push_subscription(text), my_money(uuid, timestamptz)
+  save_push_subscription(text, text, text), remove_push_subscription(text), my_money(uuid, timestamptz, timestamptz)
 to authenticated;
 -- Not callable from the app at all: new_id, money_text, biz_currency, notify, notify_all, sale_outstanding, set_product_cost,
 -- drop_business, send_due_reminders.

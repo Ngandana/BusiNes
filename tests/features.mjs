@@ -479,4 +479,104 @@ await q("inv", `select busynes.update_member('${IB}', '${wrongM}', null, null, '
 T.ok((await one("inv", `select status from busynes.list_members('${IB}') where id = '${wrongM}'`)).status === "active", "if the corrected email already has a login, they are added straight away");
 T.ok((await h.err("inv", `select busynes.update_member('${IB}', '${wrongM}', null, null, 'another@x.com')`)) !== null, "once someone has joined, their email can't be changed");
 
+// ============================================================ Q. history of who owed
+T.section("Q. Credit history");
+for (const [n, e] of [["hist", "hist@x.com"], ["hstaff", "hstaff@x.com"], ["hout", "hout@x.com"]]) await h.addUser(n, e);
+const HB = (await one("hist", `select busynes.create_business('History Co', '', 'Hist') id`)).id;
+const hOwner = (await rows("hist", "select * from busynes.my_businesses()")).find(b => b.id === HB).member_id;
+const hCake = (await one("hist", `select busynes.add_product('${HB}', 'Cake', 100, 'everyone') id`)).id;
+await invite("hist", HB, "hstaff@x.com", "Staffie", "staff");
+await h.val("hstaff", "select busynes.claim_memberships()");
+const hStaff = (await rows("hstaff", "select * from busynes.my_businesses()")).find(b => b.id === HB).member_id;
+const fiveAgo = new Date(Date.now() - 5 * 864e5).toISOString();
+const credit1 = await sale("hist", HB, [{ product_id: hCake, qty: 2 }], hOwner, { note: "Thando", paid: 50, due: "2020-01-01", at: fiveAgo });
+await sale("hist", HB, [{ product_id: hCake, qty: 1 }], hOwner, { note: "thando ", paid: 0 });
+await sale("hist", HB, [{ product_id: hCake, qty: 1 }], hOwner, { note: "Sipho" });
+await sale("hist", HB, [{ product_id: hCake, qty: 1 }], hOwner, { note: "Mpho", paid: 0, fee: 20, feeTo: hOwner });
+await sale("hstaff", HB, [{ product_id: hCake, qty: 1 }], hStaff, { note: "Lwazi", paid: 30 });
+const hist = async who => rows(who, `select * from busynes.customer_history('${HB}')`);
+let hr = await hist("hist");
+T.ok(hr.length === 4 && !hr.some(r => r.customer === "Sipho"), "the history lists every sale that was on credit and leaves out the ones paid in full: " + hr.map(r => r.customer).join());
+T.ok(hr.find(r => r.customer === "Mpho" && T.near(r.total, 120) && T.near(r.outstanding, 120)), "a loan's fee is part of what the person owes");
+const t1 = hr.find(r => r.sale_id == credit1);
+T.ok(T.near(t1.outstanding, 150) && t1.payments.length === 1 && T.near(t1.payments[0].amount, 50) && t1.cleared_at === null, "an unpaid balance shows what was paid on the day and what is still owed");
+await q("hist", `select busynes.record_payment(${credit1}, 60, 'transfer')`);
+await q("hist", `select busynes.record_payment(${credit1}, 90, 'cash')`);
+hr = await hist("hist");
+const t2 = hr.find(r => r.sale_id == credit1);
+T.ok(hr.length === 4 && T.near(t2.outstanding, 0) && t2.cleared_at !== null && t2.payments.length === 3, "after the customer pays everything the sale STAYS in the history with all 3 payments and the date it was cleared");
+T.ok(t2.payments.map(p => Number(p.amount)).join() === "50,60,90" && t2.payments[1].method === "transfer", "...payments come back oldest first with how each was paid");
+const days = (new Date(t2.cleared_at) - new Date(t2.at)) / 864e5;
+T.ok(days > 4.9 && days < 5.2, "...so the app can tell it took about 5 days to pay: " + days.toFixed(2));
+T.ok((await rows("hist", `select * from busynes.my_debts('${HB}')`)).every(d => d.sale_id != credit1), "...while 'owing now' no longer lists it");
+T.ok((await hist("hout")).length === 0, "someone outside the business sees nothing");
+T.ok((await hist("hstaff")).length === 1 && (await hist("hstaff"))[0].customer === "Lwazi", "staff only see credit on sales they handled");
+T.ok((await hist("hist")).some(r => r.customer === "Lwazi"), "in shared mode the owner also sees the staff member's credit sale");
+await q("hist", `select busynes.update_business('${HB}', null, null, 'private')`);
+T.ok(!(await hist("hist")).some(r => r.customer === "Lwazi") && (await hist("hstaff")).length === 1, "private mode: the owner no longer sees it, the staff member still does");
+T.ok((await rows("hist", `select * from busynes.customer_history('${HB}', 2)`)).length === 2, "the number of rows can be limited");
+
+// ============================================================ R. delivery fees, date ranges, settling up
+T.section("R. Delivery fees, date ranges and settling up");
+for (const [n, e] of [["dl", "dl@x.com"], ["dlrun", "dlrun@x.com"], ["dlsolo", "dlsolo@x.com"]]) await h.addUser(n, e);
+const dsale = async (who, biz, items, paidTo, o = {}) =>
+  (await one(who, `select busynes.record_sale($1::uuid, $2::jsonb, $3, $4, $5, $6::numeric, $7::date, $8::bigint, $9::numeric, $10, $11::uuid, $12::timestamptz, $13::numeric) id`,
+    [biz, J(items), paidTo, o.method || "cash", o.note || "", o.paid ?? null, null, null, 0, o.feeTo ?? null, null, null, o.del ?? 0])).id;
+const DV = (await one("dl", `select busynes.create_business('Deliver Co', '', 'Dee') id`)).id;
+const dOwner = (await rows("dl", "select * from busynes.my_businesses()")).find(b => b.id === DV).member_id;
+const dCake = (await one("dl", `select busynes.add_product('${DV}', 'Cake', 100, 'everyone') id`)).id;
+await invite("dl", DV, "dlrun@x.com", "Runner", "staff");
+await h.val("dlrun", "select busynes.claim_memberships()");
+const dRun = (await rows("dlrun", "select * from busynes.my_businesses()")).find(b => b.id === DV).member_id;
+const d1 = await dsale("dl", DV, [{ product_id: dCake, qty: 2 }], dOwner, { del: 30, feeTo: dRun });
+const tl = (await rows("dl", `select * from busynes.sales_timeline('${DV}')`)).find(r => r.id == d1);
+T.ok(T.near(tl.total, 230) && T.near(tl.delivery_fee, 30) && T.near(tl.loan_fee, 0), "a sale of 2 cakes (R200) with R30 delivery is R230, and the delivery fee is shown separately");
+const mO = await money("dl", DV), mR = await money("dlrun", DV);
+T.ok(T.near(mO.received, 230) && T.near(mO.due, 200) && T.near(mO.fees, 0), "the owner received R230 but only R200 of it is hers (the cake money)");
+T.ok(T.near(mR.received, 0) && T.near(mR.due, 30) && T.near(mR.fees, 30), "the runner who delivered is owed the R30 delivery fee");
+T.ok(lines(mO).join() === "Dee>Runner:30.00", "settle-up: the owner hands the R30 to the runner: " + lines(mO).join());
+const d2 = await dsale("dl", DV, [{ product_id: dCake, qty: 1 }], dOwner, { paid: 0, note: "Nandi", del: 20, feeTo: dRun });
+const debt = (await rows("dl", `select * from busynes.my_debts('${DV}')`)).find(d => d.sale_id == d2);
+T.ok(debt && T.near(debt.outstanding, 120) && T.near(debt.delivery_fee, 20) && T.near(debt.loan_fee, 0), "on credit, delivery is part of what the customer owes: R100 + R20 = R120");
+T.ok((await h.err("dl", `select busynes.record_payment(${d2}, 130, 'cash')`)) !== null, "paying more than R120 is refused");
+await q("dl", `select busynes.record_payment(${d2}, 120, 'cash')`);
+T.ok(!(await rows("dl", `select * from busynes.my_debts('${DV}')`)).some(d => d.sale_id == d2), "paying R120 clears it");
+T.ok(T.near((await money("dlrun", DV)).due, 50), "...and the runner's share now includes that R20 too (R30 + R20)");
+const d3 = await dsale("dl", DV, [{ product_id: dCake, qty: 1 }], dOwner, { del: 10 });
+T.ok((await db.query(`select fee_to from busynes.sales where id = ${d3}`)).rows[0].fee_to === dOwner, "with nobody chosen the delivery fee stays with whoever recorded the sale");
+T.ok(T.near((await one("dl", `select busynes.my_profit('${DV}') p`)).p.fees, 10), "...and shows up as fees earned in the owner's profit");
+T.ok(!(await h.err("dl", `select busynes.record_sale('${DV}', '[{"product_id":"${dCake}","qty":1}]'::jsonb, '${dOwner}', 'cash')`)), "a sale without a delivery fee works as before");
+T.ok((await h.err("dl", `select busynes.record_sale('${DV}', '[{"product_id":"${dCake}","qty":1}]'::jsonb, '${dOwner}', 'cash', '', null, null, null, 0, null, null, null, -5)`)) !== null, "a negative delivery fee is refused");
+T.ok((await h.err("dl", `select busynes.record_sale('${DV}', '[{"product_id":"${dCake}","qty":1}]'::jsonb, '${dOwner}', 'cash', '', null, null, null, 0, null, null, null, 100001)`)) !== null, "...and so is an absurd one");
+T.ok((await h.err("dl", `select busynes.record_sale('${DV}', '[{"product_id":"${dCake}","qty":1}]'::jsonb, '${dOwner}', 'cash', '', null, null, null, 0, 'not-a-person', null, null, 10)`)) !== null, "the fee can't go to someone outside the business");
+const dTl = (await rows("dlrun", `select * from busynes.sales_timeline('${DV}')`)).find(r => r.id == d1);
+T.ok(dTl.whole === false && dTl.delivery_fee === null && dTl.total === null, "the runner can't see the fee or total of a sale they didn't handle");
+T.ok((await one("dl", `select busynes.export_data('${DV}') d`)).d.sales.some(s => Number(s.delivery_fee) === 30), "the backup file includes delivery fees");
+
+// the money for a period: from, to, or both
+const SB = (await one("dlsolo", `select busynes.create_business('Solo Co', '', 'Sol') id`)).id;
+const sOwner = (await rows("dlsolo", "select * from busynes.my_businesses()")).find(b => b.id === SB).member_id;
+const soloTea = (await one("dlsolo", `select busynes.add_product('${SB}', 'Tea', 50, 'everyone') id`)).id;
+const ago = d => new Date(Date.now() - d * 864e5).toISOString();
+await sale("dlsolo", SB, [{ product_id: soloTea, qty: 1 }], sOwner, { at: ago(6) });
+await sale("dlsolo", SB, [{ product_id: soloTea, qty: 2 }], sOwner, { at: ago(3) });
+await sale("dlsolo", SB, [{ product_id: soloTea, qty: 1 }], sOwner);
+const mm = async (from, to) => Number((await one("dlsolo", `select busynes.my_money($1::uuid, $2::timestamptz, $3::timestamptz) m`, [SB, from, to])).m.received);
+T.ok((await mm(null, null)) === 200, "all time: R200 (R50 + R100 + R50)");
+T.ok((await mm(ago(7), ago(4))) === 50, "from 7 days ago to 4 days ago: only the first sale (R50)");
+T.ok((await mm(ago(4), null)) === 150, "from 4 days ago until now: R150");
+T.ok((await mm(null, ago(4))) === 50, "from the start up to 4 days ago: R50");
+T.ok((await mm(ago(4), ago(2))) === 100, "from 4 to 2 days ago: only the middle sale (R100)");
+T.ok((await mm(ago(2), ago(1))) === 0, "a period with no sales: nothing");
+const pr = async (from, to) => (await one("dlsolo", `select busynes.my_profit($1::uuid, $2::timestamptz, $3::timestamptz) p`, [SB, from, to])).p;
+T.ok(T.near((await pr(ago(7), ago(4))).revenue, 50) && T.near((await pr(null, null)).revenue, 200), "profit follows the same dates (R50 in the first week, R200 overall)");
+T.ok(Number((await one("dlsolo", `select busynes.my_money('${SB}') m`)).m.received) === 200, "asking without any dates still works (all time)");
+
+// settling up needs somebody to settle with
+T.ok(/nobody to settle up with/.test((await h.err("dlsolo", `select busynes.mark_settled('${SB}')`)) || ""), "a business with only you in it can't be 'marked as settled'");
+await invite("dlsolo", SB, "onlydel@x.com", "Courier", "delivery");
+T.ok((await h.err("dlsolo", `select busynes.mark_settled('${SB}')`)) !== null, "...a delivery person doesn't count (they never hold money to settle)");
+await invite("dlsolo", SB, "partner2@x.com", "Pat", "partner", "everyone", 0);
+T.ok((await h.err("dlsolo", `select busynes.mark_settled('${SB}')`)) === null, "...once there is a partner it works");
+
 process.exit(T.done());

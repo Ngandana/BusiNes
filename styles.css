@@ -169,6 +169,8 @@ a.btn{text-decoration:none;display:inline-block;text-align:center}
 .pill.warn{background:var(--amber-soft);color:var(--ink)}
 .debt{padding:12px 0;border-bottom:1px solid var(--line)}
 .debt:last-child{border-bottom:0}
+button.custrow{display:block;width:100%;text-align:left;background:none;border:0;border-bottom:1px solid var(--line);color:inherit;font:inherit;cursor:pointer}
+button.custrow:last-child{border-bottom:0}
 .debt .title{font-weight:700}
 .debt .sub{font-size:13px;color:var(--muted)}
 .notif{display:flex;gap:12px;align-items:flex-start;text-align:left;width:100%;background:none;border:0;border-bottom:1px solid var(--line);padding:12px 4px}
@@ -220,3 +222,5 @@ a.btn.ghost{color:var(--ink)}
 #salesSearch{margin-top:4px}
 .salescount .linkbtn{margin-left:8px}
 .sheet .card .eyebrow{margin-bottom:2px}
+.daterow{display:flex;gap:10px;flex-wrap:wrap}
+.daterow .field{flex:1;min-width:130px;margin:0}

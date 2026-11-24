@@ -5,7 +5,7 @@
 (() => {
 "use strict";
 
-const VERSION = "3.5";
+const VERSION = "3.7";
 const LOW = 3;               // "running low" threshold
 const POLL_MS = 20000;       // refresh while the app is open
 const OWNER_COLORS = ["var(--beer)", "var(--sib)", "var(--bottle)", "var(--warn)"]; // given to owner groups in order
@@ -16,7 +16,9 @@ const S = {
   biz: null, businesses: [], unreadBy: {}, members: null,
   partners: [], shares: [], products: [], stock: {}, moves: [], sales: [], settlements: [], money: null,
   orders: [], debts: [], notifs: [], messages: [], seenNotif: null, fromOrder: null, salesFilter: "all", sq: "", speriod: "all", smethod: "all", sstatus: "all", orderFees: {}, costs: {}, profit: null,
-  tab: "sell", cart: {}, period: "settle", editing: null, confirmDel: null, loaded: false, offline: false,
+  owedTab: "now", hist: null, histStale: true, histErr: "", hq: "", hfilter: "all",
+  sfrom: "", sto: "", salesLimit: 300, rFrom: "", rTo: "", lastRestock: null,
+  tab: "sell", cart: {}, period: "auto", editing: null, confirmDel: null, loaded: false, offline: false,
 };
 const store = {
   get(k){ try { return localStorage.getItem(k); } catch(e){ return null; } },
@@ -120,12 +122,40 @@ function show(id){
 }
 
 // ---------- data ----------
-function periodStart(){
-  const now = new Date();
-  if (S.period === "today"){ const d = new Date(now); d.setHours(0,0,0,0); return d.toISOString(); }
-  if (S.period === "week"){ const d = new Date(now); d.setHours(0,0,0,0); d.setDate(d.getDate() - ((d.getDay()+6)%7)); return d.toISOString(); }
-  if (S.period === "settle") return S.settlements[0] ? S.settlements[0].at : null;
-  return null;
+// The time span the My money screen counts. Which one is chosen is remembered for each business.
+// "auto" means: since the last settle-up if the business has partners to settle with, otherwise all time.
+const hasTeam = () => S.partners.some(p => p.id !== S.me && p.role !== "delivery");
+function curPeriod(){
+  const p = S.period === "auto" ? (hasTeam() ? "settle" : "all") : S.period;
+  return p === "settle" && !hasTeam() ? "all" : p;
+}
+const startOfDay = d => { const x = new Date(d); x.setHours(0,0,0,0); return x; };
+function weekStart(){ const d = startOfDay(new Date()); d.setDate(d.getDate() - ((d.getDay()+6)%7)); return d; }
+function periodRange(){
+  const p = curPeriod(), now = new Date(), iso = d => d.toISOString();
+  if (p === "today") return {from: iso(startOfDay(now))};
+  if (p === "week") return {from: iso(weekStart())};
+  if (p === "lastweek"){ const to = weekStart(), from = new Date(to); from.setDate(from.getDate() - 7); return {from: iso(from), to: iso(to)}; }
+  if (p === "month") return {from: iso(new Date(now.getFullYear(), now.getMonth(), 1))};
+  if (p === "lastmonth") return {from: iso(new Date(now.getFullYear(), now.getMonth() - 1, 1)), to: iso(new Date(now.getFullYear(), now.getMonth(), 1))};
+  if (p === "settle") return {from: S.settlements[0] ? S.settlements[0].at : null};
+  if (p === "restock") return {from: S.lastRestock || null};
+  if (p === "custom") return {
+    from: S.rFrom ? new Date(new Date(S.rFrom + "T00:00:00").getTime() - 1).toISOString() : null,
+    to: S.rTo ? new Date(S.rTo + "T23:59:59.999").toISOString() : null};
+  return {};
+}
+// Only send the end of the range when there is one, so a database that hasn't been updated yet keeps working.
+const rangeArgs = (b, r) => { const a = {p_biz: b, p_from: r.from || null}; if (r.to) a.p_to = r.to; return a; };
+function periodText(){
+  const p = curPeriod(), d = x => new Date(x + "T12:00:00").toLocaleDateString("en-ZA", {day:"numeric", month:"short", year:"numeric"});
+  if (p === "custom") return S.rFrom && S.rTo ? "from " + d(S.rFrom) + " to " + d(S.rTo) : S.rFrom ? "from " + d(S.rFrom) : S.rTo ? "until " + d(S.rTo) : "all time";
+  return {settle:"since the last settle-up", today:"today", week:"this week", lastweek:"last week", month:"this month", lastmonth:"last month", all:"all time", restock:"since stock was last added"}[p];
+}
+function saveRange(){ store.set("busynes.range." + bid(), JSON.stringify({period: S.period, from: S.rFrom, to: S.rTo})); }
+function loadRange(){
+  let r = {}; try { r = JSON.parse(store.get("busynes.range." + bid()) || "{}") || {}; } catch(e){}
+  S.period = r.period || "auto"; S.rFrom = r.from || ""; S.rTo = r.to || "";
 }
 async function must(q){ const r = await q; if (r.error) throw r.error; return r.data; }
 // Disable a button while its action runs, so a double tap can't save twice.
@@ -151,6 +181,7 @@ async function callRecordSale(args){
   try { return await must(S.sb.rpc("record_sale", args)); }
   catch(e){
     if (/could not find the function|schema cache/i.test((e && e.message) || "")){
+      if (args.p_delivery_fee) throw new Error("Delivery fees need the latest database update first.");
       const old = Object.assign({}, args); delete old.p_client_ref; delete old.p_at;
       return await must(S.sb.rpc("record_sale", old));
     }
@@ -244,25 +275,28 @@ async function loadAll(){
     soft(sb.from("order_fees").select("order_id,fee"), []),
     soft(sb.from("notifications").select("business_id").is("read_at", null).limit(300), []),
   ]);
-  let products = [], stock = [], moves = [], sales = [], settlements = [], debts = [];
+  let products = [], stock = [], moves = [], sales = [], settlements = [], debts = [], restock = [];
   if (full){
-    [products, stock, moves, sales, settlements, debts] = await Promise.all([
+    [products, stock, moves, sales, settlements, debts, restock] = await Promise.all([
       loadProducts(b),
       must(sb.rpc("stock_levels", {p_biz: b})),
       must(sb.from("stock_moves").select("*").eq("business_id", b).order("at",{ascending:false}).limit(8)),
-      must(sb.rpc("sales_timeline", {p_biz: b, p_limit: 300})),
+      must(sb.rpc("sales_timeline", {p_biz: b, p_limit: S.salesLimit || 300})),
       must(sb.from("settlements").select("*").eq("business_id", b).order("at",{ascending:false}).limit(20)),
       must(sb.rpc("my_debts", {p_biz: b})),
+      soft(sb.from("stock_moves").select("at").eq("business_id", b).eq("kind", "add").order("at",{ascending:false}).limit(1), []),
     ]);
   }
   Object.assign(S, {partners, shares, products, moves, sales, settlements, orders, debts, notifs, messages});
+  S.lastRestock = restock && restock[0] ? restock[0].at : null;
   S.orderFees = {}; for (const f of fees) S.orderFees[f.order_id] = num(f.fee);
   S.stock = {}; for (const r of stock) S.stock[r.product_id] = r.qty;
   S.unreadBy = {}; for (const u of unread) S.unreadBy[u.business_id] = (S.unreadBy[u.business_id] || 0) + 1;
-  S.money = isDelivery() ? null : await must(sb.rpc("my_money", {p_biz: b, p_from: periodStart()}));
+  const rng = periodRange();
+  S.money = isDelivery() ? null : await must(sb.rpc("my_money", rangeArgs(b, rng)));
   S.costs = {}; S.profit = null;
   if (canManage()){
-    const [costs, profit] = await Promise.all([soft(sb.rpc("product_costs", {p_biz: b}), []), soft(sb.rpc("my_profit", {p_biz: b, p_from: periodStart()}), null)]);
+    const [costs, profit] = await Promise.all([soft(sb.rpc("product_costs", {p_biz: b}), []), soft(sb.rpc("my_profit", rangeArgs(b, rng)), null)]);
     for (const c of costs) S.costs[c.product_id] = num(c.cost);
     S.profit = profit;
   }
@@ -291,7 +325,11 @@ async function refresh(quiet){
   }
   if (navigator.onLine && queue.all().some(q => !q.error)) await flushQueue();
   const mine = bid();
-  try { await loadAll(); if (S.biz && bid() === mine) render(); }
+  try {
+    await loadAll(); S.histStale = true;
+    if (S.biz && bid() === mine) render();
+    if (S.biz && bid() === mine && S.tab === "owed" && S.owedTab === "history") loadHistory();
+  }
   catch(e){
     // Lost access (removed from the business, or it was deleted)? Find out and move on instead of showing errors.
     if (/not part of this business|permission denied|can't|cannot/i.test((e && e.message) || "")){
@@ -318,7 +356,8 @@ async function openBusiness(id, keepTab){
   const b = S.businesses.find(x => x.id === id); if (!b) return;
   S.biz = b; S.me = b.member_id; store.set("busynes.biz", id);
   Object.assign(S, {partners:[], shares:[], products:[], stock:{}, moves:[], sales:[], settlements:[], money:null, orders:[], debts:[], notifs:[],
-    messages:[], seenNotif:null, fromOrder:null, orderFees:{}, costs:{}, profit:null, cart:{}, loaded:false, editing:null, confirmDel:null, members:null, salesFilter:"all", sq:"", speriod:"all", smethod:"all", sstatus:"all", period:"settle"});
+    messages:[], seenNotif:null, fromOrder:null, orderFees:{}, costs:{}, profit:null, cart:{}, loaded:false, editing:null, confirmDel:null, members:null, salesFilter:"all", sq:"", speriod:"all", smethod:"all", sstatus:"all", period:"auto", owedTab:"now", hist:null, histStale:true, histErr:"", hq:"", hfilter:"all", sfrom:"", sto:"", salesLimit:300, rFrom:"", rTo:"", lastRestock:null});
+  loadRange();
   draft = freshDraft();
   // Switching business lands on a normal start screen; opening the app again keeps where you were.
   if (!NAV().includes(S.tab) && !(keepTab && (S.tab === "team" || S.tab === "settings"))) S.tab = NAV()[0];
@@ -364,7 +403,7 @@ function render(){
   else html = viewReport();
   // Don't wipe a half-typed chat message when the screen refreshes.
   const chat = $("#chatInput"), keep = chat && {v: chat.value, focus: document.activeElement === chat};
-  const focusId = document.activeElement && ["sellSearch", "salesSearch"].includes(document.activeElement.id) ? document.activeElement.id : null;
+  const focusId = document.activeElement && ["sellSearch", "salesSearch", "histSearch"].includes(document.activeElement.id) ? document.activeElement.id : null;
   $("#view").innerHTML = html;
   const chat2 = $("#chatInput");
   if (keep && chat2){ chat2.value = keep.v; if (keep.focus) chat2.focus(); }
@@ -415,7 +454,7 @@ function renderCart(){
   $("#cartWhat").textContent = lines.map(l => l.qty + " × " + l.name).join(", ");
 }
 
-const freshDraft = () => ({paidTo:null, method:null, note:"", mode:"full", paid:"", due:"", fee:"", feeTo:null});
+const freshDraft = () => ({paidTo:null, method:null, note:"", mode:"full", paid:"", due:"", fee:"", feeTo:null, del:"", delOn:false});
 let draft = freshDraft();
 function checkout(){
   const lines = cartLines(); if (!lines.length) return;
@@ -425,20 +464,26 @@ function checkout(){
   const total = lines.reduce((a,l) => a + l.qty*l.price, 0);
   // fee only applies to a loan; "paid now" is everything for full, a typed amount for part, nothing for credit/loan
   const calc = () => {
-    const fee = draft.mode === "loan" ? Math.max(0, parseFloat(draft.fee) || 0) : 0, grand = total + fee;
+    const fee = draft.mode === "loan" ? Math.max(0, parseFloat(draft.fee) || 0) : 0;
+    const del = draft.delOn ? Math.max(0, parseFloat(draft.del) || 0) : 0, grand = total + fee + del;
     const paid = draft.mode === "full" ? grand : draft.mode === "part" ? Math.min(grand, Math.max(0, parseFloat(draft.paid) || 0)) : 0;
-    return {fee, grand, paid, owed: grand - paid};
+    return {fee, del, grand, paid, owed: grand - paid};
   };
   openSheet(`<div class="grab"></div>
     <h2>Record this sale</h2>
     <div class="lines num">${lines.map(l => `<div class="line"><span>${l.qty} × ${esc(l.name)}</span><span>${money(l.qty*l.price)}</span></div>`).join("")}
-      <div class="line total"><span>Total</span><span>${money(total)}</span></div></div>
+      <div class="line" id="delLine" hidden><span>Delivery</span><span id="delLineAmt"></span></div>
+      <div class="line total"><span>Total</span><span id="sheetTotal">${money(total)}</span></div></div>
     <div class="field"><span class="lab">How is it being paid?</span>
       <div class="chips" role="group"><button type="button" class="chip" data-mode="full">Paid in full</button><button type="button" class="chip" data-mode="part">Paid part</button><button type="button" class="chip" data-mode="credit">On credit</button><button type="button" class="chip" data-mode="loan">Loan with a fee</button></div></div>
     <div class="field" id="partBox" hidden><label for="paidNow">Paid now (${cur()})</label><input id="paidNow" class="text num" type="number" inputmode="decimal" min="0" max="${total}" step="1" value="${esc(draft.paid)}"></div>
     <div class="field" id="feeBox" hidden><label for="feeAmt">Loan fee (${cur()})</label><input id="feeAmt" class="text num" type="number" inputmode="decimal" min="0" step="1" placeholder="e.g. 50" value="${esc(draft.fee)}">
       <span class="muted" style="font-size:13px">What you charge for lending. It's added to what they owe and it's yours, not the owners' of the items. Other people can't see it.</span></div>
-    <div class="field" id="feeToBox" hidden><span class="lab">Who keeps the fee?</span>
+    <div class="field" id="delBox"><span class="lab">Delivery</span>
+      <div class="chips" role="group"><button type="button" class="chip" id="delToggle" aria-pressed="${draft.delOn}">Charge a delivery fee</button></div>
+      <div id="delFields" ${draft.delOn ? "" : "hidden"}><label for="delAmt">Delivery fee (${cur()})</label><input id="delAmt" class="text num" type="number" inputmode="decimal" min="0" step="1" placeholder="e.g. 20" value="${esc(draft.del)}">
+        <span class="muted" style="font-size:13px">Added to what the customer pays. It goes to the person you pick below, not to the owners of the items.</span></div></div>
+    <div class="field" id="feeToBox" hidden><span class="lab" id="feeToLab">Who keeps the fee?</span>
       <div class="chips" role="group">${S.partners.map(p => `<button type="button" class="chip" data-feeto="${esc(p.id)}" aria-pressed="${draft.feeTo===p.id}">${esc(p.id === S.me ? "Me" : p.name)}</button>`).join("")}</div></div>
     <div class="field" id="dueBox" hidden><label for="dueOn" id="dueLab">Promised to pay the rest on</label><input id="dueOn" class="text" type="date" value="${esc(draft.due)}">
       <div class="chips"><button type="button" class="chip" data-dueadd="3">In 3 days</button><button type="button" class="chip" data-dueadd="7">In a week</button><button type="button" class="chip" data-dueadd="14">In 2 weeks</button></div></div>
@@ -450,23 +495,32 @@ function checkout(){
     <div class="field"><label for="saleNote" id="noteLab">Customer or note (optional)</label><input id="saleNote" class="text" maxlength="80" placeholder="e.g. Thando, block C" value="${esc(draft.note)}"></div>
     <div class="row"><button class="btn ghost" type="button" id="sheetCancel">Back</button><span class="spacer"></span><button class="btn" type="button" id="saveSale"></button></div>`);
   const sync = () => {
-    const {fee, grand, paid, owed} = calc(), loan = draft.mode === "loan";
+    const {fee, del, grand, paid, owed} = calc(), loan = draft.mode === "loan";
     document.querySelectorAll("[data-mode]").forEach(b => b.setAttribute("aria-pressed", String(b.dataset.mode === draft.mode)));
     $("#partBox").hidden = draft.mode !== "part";
     $("#feeBox").hidden = !loan;
-    $("#feeToBox").hidden = !(loan && fee > 0);
+    $("#feeToBox").hidden = !((loan && fee > 0) || del > 0);
+    $("#feeToLab").textContent = fee > 0 && del > 0 ? "Who keeps the fees?" : del > 0 ? "Who keeps the delivery fee?" : "Who keeps the fee?";
+    $("#delLine").hidden = !(del > 0); $("#delLineAmt").textContent = money2(del); $("#sheetTotal").textContent = money2(total + del);
     $("#dueBox").hidden = owed <= 0.005;
     $("#dueLab").textContent = loan ? "Promised to pay it back on" : "Promised to pay the rest on";
     $("#methodBox").hidden = paid <= 0;
     $("#whoLab").textContent = paid <= 0 ? "Who is collecting the money?" : "Who got the money?";
     $("#noteLab").textContent = owed > 0.005 ? "Customer's name (needed so you know who owes)" : "Customer or note (optional)";
     const n = $("#owedNote"); n.hidden = owed <= 0.005;
-    n.textContent = owed > 0.005 ? `${draft.note.trim() || "The customer"} will owe ${money2(owed)}${fee > 0 ? ` (${money(total)} + ${money2(fee)} fee)` : ""}.` : "";
-    $("#saveSale").textContent = loan ? `Save loan · owes ${money2(owed)}` : owed > 0.005 ? `Save · ${money2(paid)} now, ${money2(owed)} owed` : `Save sale · ${money(total)}`;
+    n.textContent = owed > 0.005 ? `${draft.note.trim() || "The customer"} will owe ${money2(owed)}${fee > 0 || del > 0 ? ` (${money(total)}${fee > 0 ? ` + ${money2(fee)} fee` : ""}${del > 0 ? ` + ${money2(del)} delivery` : ""})` : ""}.` : "";
+    $("#saveSale").textContent = loan ? `Save loan · owes ${money2(owed)}` : owed > 0.005 ? `Save · ${money2(paid)} now, ${money2(owed)} owed` : `Save sale · ${money2(total + del)}`;
   };
   document.querySelectorAll("[data-mode]").forEach(b => b.onclick = () => { draft.mode = b.dataset.mode; sync(); if (draft.mode === "part" && !draft.paid) $("#paidNow").focus(); if (draft.mode === "loan" && !draft.fee) $("#feeAmt").focus(); });
   $("#paidNow").oninput = e => { draft.paid = e.target.value; sync(); };
   $("#feeAmt").oninput = e => { draft.fee = e.target.value; sync(); };
+  $("#delToggle").onclick = () => {
+    draft.delOn = !draft.delOn;
+    if (draft.delOn && !draft.del) draft.del = store.get("busynes.delfee." + bid()) || "";     // the fee you usually charge
+    $("#delToggle").setAttribute("aria-pressed", String(draft.delOn)); $("#delFields").hidden = !draft.delOn; $("#delAmt").value = draft.del;
+    sync(); if (draft.delOn) $("#delAmt").focus();
+  };
+  $("#delAmt").oninput = e => { draft.del = e.target.value; sync(); };
   document.querySelectorAll("[data-feeto]").forEach(b => b.onclick = () => { draft.feeTo = b.dataset.feeto; document.querySelectorAll("[data-feeto]").forEach(x => x.setAttribute("aria-pressed", String(x===b))); });
   $("#dueOn").oninput = e => { draft.due = e.target.value; };
   document.querySelectorAll("[data-dueadd]").forEach(b => b.onclick = () => {
@@ -479,7 +533,7 @@ function checkout(){
   $("#sheetCancel").onclick = closeSheet;
   sync();
   $("#saveSale").onclick = async e => {
-    const {fee, grand, paid, owed} = calc();
+    const {fee, del, grand, paid, owed} = calc();
     if (owed > 0.005 && !draft.note.trim()) return toast("Type the customer's name so you know who owes.");
     e.target.disabled = true;
     const sale = {at:new Date().toISOString(), items:lines, total, paidTo:draft.paidTo, method:draft.method, note:draft.note.trim(), due: owed > 0.005 && draft.due ? draft.due : null};
@@ -488,16 +542,17 @@ function checkout(){
       p_items: lines.map(l => ({product_id:l.product_id, qty:l.qty})),
       p_paid_to: sale.paidTo, p_method: sale.method, p_note: sale.note,
       p_paid: paid, p_due: sale.due, p_order: S.fromOrder || null,
-      p_fee: fee, p_fee_to: fee > 0 ? (draft.feeTo || S.me) : null,
+      p_fee: fee, p_fee_to: fee + del > 0 ? (draft.feeTo || S.me) : null,
       p_client_ref: newRef(), p_at: sale.at,          // so a retry can't double-record it, and it keeps the time it happened
     };
-    const finish = () => { store.set("busynes.method." + bid(), sale.method); S.cart = {}; S.fromOrder = null; draft = freshDraft(); closeSheet(); };
+    if (del > 0) args.p_delivery_fee = del;
+    const finish = () => { store.set("busynes.method." + bid(), sale.method); if (del > 0) store.set("busynes.delfee." + bid(), String(del)); S.cart = {}; S.fromOrder = null; draft = freshDraft(); closeSheet(); };
     const keepOnPhone = () => { queueSale(args, lines, total, sale.paidTo); finish(); toast("Saved on this phone. It will be sent when you're back online."); render(); };
     if (!navigator.onLine){ keepOnPhone(); return; }
     try {
       await callRecordSale(args);
       finish();
-      toast(fee > 0 ? `Loan saved. ${sale.note} owes ${money2(owed)}.` : owed > 0.005 ? `Saved. ${sale.note} owes ${money2(owed)}.` : "Saved " + money(total) + " paid to " + pname(sale.paidTo) + ".",
+      toast(fee > 0 ? `Loan saved. ${sale.note} owes ${money2(owed)}.` : owed > 0.005 ? `Saved. ${sale.note} owes ${money2(owed)}.` : "Saved " + money2(total + del) + " paid to " + pname(sale.paidTo) + ".",
             {label:"Copy for group", run:() => copyText(saleText(sale), "Copied. Paste it in your group.")});
       await refresh();
     } catch(err){
@@ -526,10 +581,110 @@ function dueInfo(d){
   return {label:`Due ${dueText(d)}`, cls:"", rank:3};
 }
 
+// ---------- credit history: everyone who has ever owed, paid or not ----------
+const custKey = n => String(n || "").toLowerCase().replace(/\s+/g, " ").trim();
+const shortDay = d => new Date(d).toLocaleDateString("en-ZA", {day:"numeric", month:"short"});
+const daysBetween = (a, b) => Math.max(0, Math.round((new Date(b) - new Date(a)) / 864e5));
+async function loadHistory(){
+  if (S.histBusy) return;
+  const mine = bid(); S.histBusy = true; S.histErr = "";
+  try { const rows = await must(S.sb.rpc("customer_history", {p_biz: mine, p_limit: 1000})); if (bid() === mine){ S.hist = rows; S.histStale = false; } }
+  catch(e){
+    if (bid() === mine) S.histErr = /customer_history|schema cache|does not exist|could not find/i.test((e && e.message) || "") ? "update" : "failed";
+  }
+  S.histBusy = false;
+  if (S.biz && bid() === mine && S.tab === "owed" && S.owedTab === "history") render();
+}
+// One entry per customer (same name, ignoring capitals and extra spaces), newest credit first.
+function customers(rows){
+  const map = new Map(), today = dayKey(new Date());
+  for (const r of rows || []){
+    const k = custKey(r.customer) || "?";
+    let c = map.get(k);
+    if (!c) map.set(k, c = {key: k, name: String(r.customer || "").trim() || "No name", sales: [], borrowed: 0, paid: 0, owing: 0, cleared: 0, days: [], late: 0, last: r.at});
+    c.sales.push(r);
+    c.borrowed += num(r.total); c.paid += num(r.paid); c.owing += num(r.outstanding);
+    const open = num(r.outstanding) > 0.005;
+    if (!open){ c.cleared++; if (r.cleared_at) c.days.push(daysBetween(r.at, r.cleared_at)); }
+    if (r.due_on && (open ? r.due_on < today : r.cleared_at && dayKey(r.cleared_at) > r.due_on)) c.late++;
+  }
+  return [...map.values()];
+}
+function payHabit(c){
+  const bits = [];
+  if (c.days.length){
+    const avg = Math.round(c.days.reduce((a, d) => a + d, 0) / c.days.length);
+    bits.push(avg <= 0 ? "usually pays the same day" : `usually pays back in ${avg} day${avg === 1 ? "" : "s"}`);
+  }
+  if (c.late) bits.push(`late ${c.late} time${c.late === 1 ? "" : "s"}`);
+  else if (c.sales.some(s => s.due_on)) bits.push("never late");
+  return bits.join(" · ");
+}
+function viewHistory(){
+  let h = "";
+  if (S.histErr === "update") return `<div class="empty"><b>History needs one more update</b>The history of who owed you can't load yet. The app's database needs its latest update first. Ask whoever set it up to run it, then try again.</div>`;
+  if (S.histErr) return `<div class="empty"><b>Couldn't load the history</b>Check your connection, then <button class="linkbtn" type="button" data-histretry>try again</button>.</div>`;
+  if (!S.hist) return `<div class="empty"><b>Loading…</b>Fetching your customers' history.</div>`;
+  const all = customers(S.hist), q = custKey(S.hq);
+  const list = all.filter(c => (S.hfilter === "all" || (S.hfilter === "owing" ? c.owing > 0.005 : c.owing <= 0.005)) && (!q || c.key.includes(q)))
+    .sort((a, b) => (b.owing > 0.005) - (a.owing > 0.005) || String(b.last).localeCompare(String(a.last)));
+  const filtering = !!q || S.hfilter !== "all";
+  if (!all.length) return `<div class="empty"><b>No credit history yet</b>Once a customer takes something on credit, they appear here for good, even after they've paid everything back.</div>`;
+  const lent = all.reduce((a, c) => a + c.borrowed, 0), back = all.reduce((a, c) => a + c.paid, 0);
+  h += `<section class="kpis"><div class="kpi"><span class="eyebrow">Given on credit</span><b class="num">${money2(lent)}</b><span class="muted">${all.length} customer${all.length === 1 ? "" : "s"}</span></div>
+    <div class="kpi"><span class="eyebrow">Paid back</span><b class="num">${money2(back)}</b><span class="muted">${lent > 0 ? Math.round(back / lent * 100) : 0}% so far</span></div></section>
+    <input id="histSearch" class="text" type="search" placeholder="Find a customer" aria-label="Find a customer" autocomplete="off" value="${esc(S.hq || "")}">
+    <div class="chips seg" role="group">${[["all","Everyone"],["owing","Still owing"],["paid","Paid up"]].map(([k,l]) => `<button type="button" class="chip" data-hfilter="${k}" aria-pressed="${S.hfilter === k}">${l}</button>`).join("")}</div>`;
+  if (!list.length) return h + `<div class="empty"><b>No customers match</b>Try a different name, or <button class="linkbtn" type="button" data-hclear>clear the search</button>.</div>`;
+  h += `<section class="card"><div class="list">` + list.map(c => {
+    const habit = payHabit(c);
+    return `<button type="button" class="debt custrow" data-cust="${esc(c.key)}"><div class="row"><span class="title">${esc(c.name)}</span><span class="spacer"></span>${c.owing > 0.005 ? `<span class="pill bad">Owes ${money2(c.owing)}</span>` : `<span class="pill good">All paid</span>`}</div>
+      <div class="sub">${c.sales.length} time${c.sales.length === 1 ? "" : "s"} on credit · ${money2(c.borrowed)} in total · last ${shortDay(c.last)}${habit ? " · " + esc(habit) : ""}</div></button>`;
+  }).join("") + `</div></section>`;
+  if (filtering) h += `<p class="muted salescount" style="margin:0"><b>${list.length}</b> of ${all.length} customers <button class="linkbtn" type="button" data-hclear>Clear</button></p>`;
+  return h + `<p class="muted" style="font-size:13px">Shows credit on sales you handled${S.biz.privacy === "shared" && canManage() ? ", plus everyone else's if you're an owner or partner" : ""}. Customers are matched by the name typed on the sale.</p>`;
+}
+// What a customer owes and has paid, sale by sale, with every payment's date.
+function customerSheet(key){
+  const c = customers(S.hist).find(x => x.key === key); if (!c) return;
+  const sales = c.sales.slice().sort((a, b) => String(a.at).localeCompare(String(b.at)));
+  const habit = payHabit(c);
+  const block = s => {
+    const open = num(s.outstanding) > 0.005, di = open ? dueInfo(s.due_on) : null;
+    const pays = (s.payments || []).filter(p => !(new Date(p.at) <= new Date(s.at)));
+    const first = num(s.paid) - pays.reduce((a, p) => a + num(p.amount), 0);
+    return `<div class="debt"><div class="row"><span class="title">${esc(s.items || "Sale")}</span><span class="spacer"></span><b class="num">${money2(s.total)}</b></div>
+      <div class="sub">${dayLabel(s.at)}${num(s.loan_fee) > 0 ? ` · loan, ${money2(s.loan_fee)} fee` : ""}${num(s.delivery_fee) > 0 ? ` · includes ${money2(s.delivery_fee)} delivery` : ""}${s.due_on ? " · due " + dueText(s.due_on) : ""}</div>
+      <div class="sub">${first > 0.005 ? `Paid ${money2(first)} on the day` : "Nothing paid on the day"}</div>
+      ${pays.map(p => `<div class="sub">✓ ${money2(p.amount)} on ${shortDay(p.at)} · ${p.method === "cash" ? "cash" : "account"} → ${esc(Pname(p.paid_to))}</div>`).join("")}
+      <div style="margin-top:6px">${open ? `<span class="pill ${di.cls || "bad"}">Still owes ${money2(s.outstanding)}</span> <span class="pill ${di.cls}">${esc(di.label)}</span>` : `<span class="pill good">Paid in full${s.cleared_at ? " · " + shortDay(s.cleared_at) : ""}</span>`}</div></div>`;
+  };
+  openSheet(`<div class="grab"></div><h2>${esc(c.name)}</h2>
+    <p class="muted" style="margin:-10px 0 0">${c.owing > 0.005 ? `Owes ${money2(c.owing)} now` : "Nothing owing now"} · ${money2(c.paid)} paid of ${money2(c.borrowed)}${habit ? " · " + esc(habit) : ""}</p>
+    <div class="list" style="max-height:48vh;overflow-y:auto;margin:10px 0">${sales.map(block).join("")}</div>
+    <div class="row" style="gap:8px;flex-wrap:wrap"><a class="btn" target="_blank" rel="noopener" href="https://wa.me/?text=${encodeURIComponent(statementText(c))}">WhatsApp statement</a>
+      <button class="btn ghost" type="button" id="stCopy">Copy</button><span class="spacer"></span><button class="btn ghost" type="button" id="sheetCancel">Close</button></div>`);
+  $("#sheetCancel").onclick = closeSheet;
+  $("#stCopy").onclick = () => copyText(statementText(c), "Copied. Paste it in a message to them.");
+}
+function statementText(c){
+  const sales = c.sales.slice().sort((a, b) => String(a.at).localeCompare(String(b.at)));
+  const lines = sales.map(s => {
+    const open = num(s.outstanding) > 0.005;
+    const pays = (s.payments || []).filter(p => !(new Date(p.at) <= new Date(s.at)));
+    return `• ${shortDay(s.at)}: ${s.items} (${money2(s.total)}${num(s.delivery_fee) > 0 ? " incl. " + money2(s.delivery_fee) + " delivery" : ""})` + (pays.length ? ` – paid ${pays.map(p => money2(p.amount) + " on " + shortDay(p.at)).join(", ")}` : "") +
+      (open ? ` – still owing ${money2(s.outstanding)}${s.due_on ? " (due " + dueText(s.due_on) + ")" : ""}` : " – paid in full ✅");
+  });
+  return `Hi ${c.name}, here is your account with ${S.biz.name}:\n${lines.join("\n")}\n` +
+    (c.owing > 0.005 ? `Total still owing: ${money2(c.owing)}. Thank you!` : `Nothing owing. Thank you!`);
+}
+
 function viewOwed(){
   const list = S.debts, m = S.money || {};
   const sum = list.reduce((a,d) => a + num(d.outstanding), 0);
-  let h = `<h2>Who owes</h2>`;
+  const tabs = `<div class="chips seg" role="group">${[["now",`Owing now${list.length ? " (" + list.length + ")" : ""}`],["history","History"]].map(([k,l]) => `<button type="button" class="chip" data-owedtab="${k}" aria-pressed="${S.owedTab === k}">${l}</button>`).join("")}</div>`;
+  if (S.owedTab === "history") return `<h2>Who owes</h2>${tabs}${viewHistory()}`;
+  let h = `<h2>Who owes</h2>${tabs}`;
   if (!list.length){
     h += `<div class="empty"><b>Nobody owes you anything</b>When a customer pays part, or takes something on credit, it shows here with the date they promised.</div>`;
   } else {
@@ -539,7 +694,7 @@ function viewOwed(){
       const di = dueInfo(d.due_on);
       return `<div class="debt"><div class="row"><span class="title">${esc(d.customer || "No name")}</span><span class="spacer"></span><b class="num">${money2(d.outstanding)}</b></div>
         <div class="sub">${esc(d.items)} · ${money2(d.paid)} of ${money2(d.total)} paid · ${dayLabel(d.at)}${d.paid_to !== S.me ? " · " + esc(Pname(d.paid_to)) + " collects" : ""}</div>
-        <div class="row" style="margin-top:6px">${num(d.loan_fee) > 0 ? `<span class="pill warn">Loan · ${money2(d.loan_fee)} fee</span>` : ""}<span class="pill ${di.cls}">${esc(di.label)}</span><span class="spacer"></span>
+        <div class="row" style="margin-top:6px">${num(d.loan_fee) > 0 ? `<span class="pill warn">Loan · ${money2(d.loan_fee)} fee</span>` : ""}${num(d.delivery_fee) > 0 ? `<span class="pill warn">Delivery · ${money2(d.delivery_fee)}</span>` : ""}<span class="pill ${di.cls}">${esc(di.label)}</span><span class="spacer"></span>
           <button class="linkbtn" type="button" data-due="${d.sale_id}">Change date</button>
           <a class="linkbtn" href="https://wa.me/?text=${encodeURIComponent(reminderText(d))}" target="_blank" rel="noopener">WhatsApp reminder</a>
           <button class="linkbtn" type="button" data-remind="${d.sale_id}">Copy</button>
@@ -933,16 +1088,20 @@ function saleOwes(s){ return s.whole && s.total != null && s.paid != null ? num(
 function viewSales(){
   const mine = x => x.paid_to === S.me || x.recorded_by === S.me;
   const base = S.salesFilter === "mine" ? S.sales.filter(mine) : S.sales;
-  const since = {today: new Date().setHours(0,0,0,0), week: Date.now() - 7*864e5, month: Date.now() - 30*864e5}[S.speriod];
+  const custom = S.speriod === "custom";
+  const since = custom ? (S.sfrom ? new Date(S.sfrom + "T00:00:00").getTime() : 0) : {today: new Date().setHours(0,0,0,0), week: Date.now() - 7*864e5, month: Date.now() - 30*864e5}[S.speriod];
+  const until = custom && S.sto ? new Date(S.sto + "T23:59:59.999").getTime() : 0;
   const q = (S.sq || "").trim();
-  const list = base.filter(s => (!since || new Date(s.at).getTime() >= since) && (S.smethod === "all" || s.method === (S.smethod === "cash" ? "cash" : "transfer"))
+  const list = base.filter(s => (!since || new Date(s.at).getTime() >= since) && (!until || new Date(s.at).getTime() <= until) && (S.smethod === "all" || s.method === (S.smethod === "cash" ? "cash" : "transfer"))
     && (S.sstatus === "all" || saleOwes(s) > 0.005) && (!q || saleMatches(s, q)));
   const filtering = !!q || S.speriod !== "all" || S.smethod !== "all" || S.sstatus !== "all";
   const chips = (key, attr, opts) => `<div class="chips seg" role="group">${opts.map(([k,l]) => `<button type="button" class="chip" data-${attr}="${k}" aria-pressed="${S[key]===k}">${l}</button>`).join("")}</div>`;
   let h = `<h2>Sales</h2><p class="muted" style="margin:-12px 0 0">Everything that's been sold, newest first: what, when, who sold it and where the money went. Amounts only show for your own products and for sales you handled${S.biz.privacy === "shared" && canManage() ? ", plus everything else if you're an owner or partner" : ""}.</p>
     <div class="chips" role="group">${[["all","Everyone's"],["mine","Mine"]].map(([k,l]) => `<button type="button" class="chip" data-sfilter="${k}" aria-pressed="${S.salesFilter===k}">${l}</button>`).join("")}</div>
     <input id="salesSearch" class="text" type="search" placeholder="Search: item, customer, person, amount..." aria-label="Search sales" autocomplete="off" value="${esc(S.sq || "")}">
-    ${chips("speriod", "speriod", [["all","Any time"],["today","Today"],["week","7 days"],["month","30 days"]])}
+    ${chips("speriod", "speriod", [["all","Any time"],["today","Today"],["week","7 days"],["month","30 days"],["custom","Pick dates"]])}
+    ${custom ? `<div class="daterow"><div class="field"><label for="sFrom">From</label><input id="sFrom" class="text" type="date" value="${esc(S.sfrom)}" max="${dayKey(new Date())}"></div>
+      <div class="field"><label for="sTo">To</label><input id="sTo" class="text" type="date" value="${esc(S.sto)}" max="${dayKey(new Date())}"></div></div>` : ""}
     ${chips("smethod", "smethod", [["all","Cash + account"],["cash","Cash"],["transfer","Account"]])}
     ${chips("sstatus", "sstatus", [["all","All sales"],["owing","Still owing"]])}`;
   h += offlineBanner();
@@ -966,34 +1125,48 @@ function viewSales(){
     const del = S.confirmDel === s.id, canDel = s.whole && (mine(s) || isOwner());
     h += `<div class="sale"><div class="top"><span class="what">${items.map(i => i.qty + " × " + esc(i.name)).join(", ")}</span>${s.whole || priced.length ? `<b class="num">${money(amount)}</b>` : ""}</div>
       <div class="row" style="gap:6px;font-size:13px"><span class="pill ${s.method==="cash"?"cash":""}">${s.method === "cash" ? "Cash" : "Account"} → ${esc(Pname(s.paid_to))}</span>
-      ${owes > 0.005 ? `<span class="pill bad">Owes ${money2(owes)}</span>` : ""}${s.whole && num(s.loan_fee) > 0 ? `<span class="pill warn">Loan</span>` : ""}
+      ${owes > 0.005 ? `<span class="pill bad">Owes ${money2(owes)}</span>` : ""}${s.whole && num(s.loan_fee) > 0 ? `<span class="pill warn">Loan</span>` : ""}${s.whole && num(s.delivery_fee) > 0 ? `<span class="pill warn">Delivery ${money2(s.delivery_fee)}</span>` : ""}
       <span class="muted">${timeLabel(s.at)} · sold by ${esc(pname(s.recorded_by))}${s.note ? " · " + esc(s.note) : ""}${!s.whole && priced.length ? " · amount is your items only" : ""}</span><span class="spacer"></span>
       ${canDel ? (del ? `<button class="linkbtn" type="button" data-nodel>Keep</button><button class="linkbtn bad" type="button" data-dodel="${s.id}">Yes, delete</button>` : `<button class="linkbtn" type="button" data-del="${s.id}">Delete</button>`) : ""}</div></div>`;
   }
-  return h + `</div></section>`;
+  h += `</div></section>`;
+  if (S.sales.length >= (S.salesLimit || 300) && (S.salesLimit || 300) < 5000) h += `<p class="muted" style="text-align:center">Showing your latest ${S.sales.length} sales. <button class="linkbtn" type="button" data-moresales>Show older sales</button></p>`;
+  return h;
 }
 
 // ---------- my money ----------
 function viewReport(){
   const m = S.money || {received:0, received_cash:0, due:0, sold:[], pays:[], orders:0};
-  const periods = [["settle","Since settle-up"],["today","Today"],["week","Week"],["all","All time"]];
-  let h = `<h2>My money</h2><div class="chips seg">${periods.map(([k,l]) => `<button type="button" class="chip" data-period="${k}" aria-pressed="${S.period===k}">${l}</button>`).join("")}</div>`;
-  if (S.period === "settle") h += `<p class="muted" style="margin:-8px 0 0">${S.settlements[0] ? "Counting from the settle-up on " + dayLabel(S.settlements[0].at) + " at " + timeLabel(S.settlements[0].at) + "." : "No settle-ups yet, so this counts every sale."}</p>`;
+  const team = hasTeam(), cp = curPeriod();
+  const periods = [...(team ? [["settle","Since settle-up"]] : []), ["today","Today"],["week","This week"],["lastweek","Last week"],["month","This month"],["lastmonth","Last month"],["all","All time"],["restock","Since new stock"],["custom","Pick dates"]];
+  let h = `<h2>My money</h2><div class="chips seg">${periods.map(([k,l]) => `<button type="button" class="chip" data-period="${k}" aria-pressed="${cp===k}">${l}</button>`).join("")}</div>`;
+  const note = t => `<p class="muted" style="margin:-8px 0 0">${t}</p>`;
+  if (cp === "settle") h += note(S.settlements[0] ? "Counting from the settle-up on " + dayLabel(S.settlements[0].at) + " at " + timeLabel(S.settlements[0].at) + "." : "No settle-ups yet, so this counts every sale.");
+  else if (cp === "restock") h += note(S.lastRestock ? "Counting from " + dayLabel(S.lastRestock) + " at " + timeLabel(S.lastRestock) + ", when stock was last added." : "No stock has been added yet, so this counts every sale.");
+  else if (cp === "custom") h += `<div class="daterow"><div class="field"><label for="rFrom">From</label><input id="rFrom" class="text" type="date" value="${esc(S.rFrom)}" max="${dayKey(new Date())}"></div>
+      <div class="field"><label for="rTo">To</label><input id="rTo" class="text" type="date" value="${esc(S.rTo)}" max="${dayKey(new Date())}"></div></div>
+      ${S.rFrom || S.rTo ? `<p class="muted" style="margin:-6px 0 0">Counting ${periodText()}. <button class="linkbtn" type="button" data-rclear>Clear dates</button></p>` : note("Choose the dates you want to look at. Leave one empty to count from the very start, or up to now.")}`;
+  else if (cp === "all") h += note("Everything since you started, whenever it was.");
 
   const received = num(m.received), cash = num(m.received_cash), due = num(m.due), diff = Math.round((received - due)*100)/100;
+  const feeNote = num(m.fees) > 0.005 ? " · " + money2(m.fees) + " fees" : "";
   h += `<div class="kpis">
     <div class="kpi"><span class="eyebrow">Money you received</span><b class="num">${money2(received)}</b><span class="muted num">${money(cash)} cash · ${money(received - cash)} account</span></div>
-    <div class="kpi"><span class="eyebrow">Your share collected</span><b class="num">${money2(due)}</b><span class="muted num">${money(m.sold_value != null ? m.sold_value : due)} of your stock sold${num(m.fees) > 0.005 ? " · " + money2(m.fees) + " loan fees" : ""}</span></div></div>`;
-  if (num(m.outstanding) > 0.005) h += `<section class="card statement">Customers still owe <b class="num">${money2(m.outstanding)}</b> on your products and loan fees. It counts here once they pay.</section>`;
-  h += `<section class="card statement">${diff > 0 ? `You're holding <b class="num">${money2(diff)}</b> that belongs to the others.`
-       : diff < 0 ? `The others are holding <b class="num">${money2(-diff)}</b> of your money.`
-       : `You hold exactly your own money.`}</section>`;
+    ${team ? `<div class="kpi"><span class="eyebrow">Your share collected</span><b class="num">${money2(due)}</b><span class="muted num">${money(m.sold_value != null ? m.sold_value : due)} of your stock sold${feeNote}</span></div>`
+            : `<div class="kpi"><span class="eyebrow">Sales paid</span><b class="num">${num(m.orders)}</b><span class="muted num">${money(m.sold_value != null ? m.sold_value : due)} of stock sold${feeNote}</span></div>`}</div>`;
+  if (num(m.outstanding) > 0.005) h += `<section class="card statement">Customers still owe <b class="num">${money2(m.outstanding)}</b> on your products and fees. It counts here once they pay.</section>`;
+  if (team){
+    h += `<section class="card statement">${diff > 0 ? `You're holding <b class="num">${money2(diff)}</b> that belongs to the others.`
+         : diff < 0 ? `The others are holding <b class="num">${money2(-diff)}</b> of your money.`
+         : `You hold exactly your own money.`}</section>`;
 
-  h += `<section class="card"><div class="eyebrow">To settle up</div>`;
-  h += m.pays.length ? m.pays.map(p => `<div class="pay"><span>${esc(payText(p))}</span><span class="amt num ${payFromMe(p) ? "pos" : "neg"}">${money2(p.amount)}</span></div>`).join("")
-    : `<p style="margin:8px 0 0">Nothing to hand over for you.</p>`;
-  if (m.pays.some(p => (p.from_ids || []).length > 1 || (p.to_ids || []).length > 1)) h += `<p class="muted" style="margin:10px 0 0;font-size:13px">Partners who run the same stock together settle as one, so it doesn't matter which of them gets the money.</p>`;
-  h += `<div class="row" style="margin-top:12px"><button class="btn ghost small" type="button" data-copyreport>Copy my settle-up</button><span class="spacer"></span>${canManage() ? `<button class="btn small" type="button" data-settle>Mark as settled</button>` : ""}</div></section>`;
+    h += `<section class="card"><div class="eyebrow">To settle up</div>`;
+    h += m.pays.length ? m.pays.map(p => `<div class="pay"><span>${esc(payText(p))}</span><span class="amt num ${payFromMe(p) ? "pos" : "neg"}">${money2(p.amount)}</span></div>`).join("")
+      : `<p style="margin:8px 0 0">Nothing to hand over for you.</p>`;
+    if (cp !== "settle") h += `<p class="muted" style="margin:10px 0 0;font-size:13px">This is for ${periodText()}. To work out what to hand over today, choose "Since settle-up".</p>`;
+    if (m.pays.some(p => (p.from_ids || []).length > 1 || (p.to_ids || []).length > 1)) h += `<p class="muted" style="margin:10px 0 0;font-size:13px">Partners who run the same stock together settle as one, so it doesn't matter which of them gets the money.</p>`;
+    h += `<div class="row" style="margin-top:12px"><button class="btn ghost small" type="button" data-copyreport>Copy my settle-up</button><span class="spacer"></span>${canManage() ? `<button class="btn small" type="button" data-settle>Mark as settled</button>` : ""}</div></section>`;
+  }
 
   h += profitCard();
   const sold = m.sold || [];
@@ -1022,7 +1195,7 @@ function profitCard(){
   if (costed > 0){
     h += `<div class="big num ${verdict.cls}">${money2(profit)}</div>
       <p class="muted" style="margin:2px 0 0">From ${money2(costed)} of sales, minus ${money2(cost)} it cost you. <b>${pct1(margin)}</b> of what you sell is profit.</p>`;
-    if (fees > 0.005) h += `<div class="row" style="margin-top:10px"><span>Loan fees earned</span><span class="spacer"></span><b class="num">+${money2(fees)}</b></div>
+    if (fees > 0.005) h += `<div class="row" style="margin-top:10px"><span>Fees earned (loan and delivery)</span><span class="spacer"></span><b class="num">+${money2(fees)}</b></div>
       <div class="row"><span>Profit with fees</span><span class="spacer"></span><b class="num">${money2(profit + fees)}</b></div>`;
   } else {
     h += `<p class="muted" style="margin:8px 0 0">Nothing with a cost set was sold in this period.</p>`;
@@ -1050,7 +1223,7 @@ function payText(p){
 }
 function reportText(){
   const m = S.money, me = (S.partners.find(p => p.id === S.me) || {}).name;
-  const lbl = {settle:"since last settle-up", today:"today", week:"this week", all:"all time"}[S.period];
+  const lbl = periodText();
   return `📊 ${me}'s settle-up (${lbl})\n` + (m.pays.length ? m.pays.map(p => `${payText(p)}: ${money2(p.amount)}`).join("\n") : "Nothing to hand over.");
 }
 function settleSheet(){
@@ -1060,7 +1233,7 @@ function settleSheet(){
   $("#sheetCancel").onclick = closeSheet;
   $("#doSettle").onclick = async e => {
     e.target.disabled = true;
-    try { await must(S.sb.rpc("mark_settled", {p_biz: bid()})); closeSheet(); S.period = "settle"; toast("Settled. Starting fresh."); await refresh(); }
+    try { await must(S.sb.rpc("mark_settled", {p_biz: bid()})); closeSheet(); S.period = "settle"; saveRange(); toast("Settled. Starting fresh."); await refresh(); }
     catch(err){ e.target.disabled = false; failed(err); }
   };
 }
@@ -1082,8 +1255,8 @@ function salesCsv(d){
   sales.forEach((s, i) => (s.items || []).forEach(it => rows.push([
     sales.length - i, dayKey(s.at), timeLabel(s.at), s.sold_by, s.money_to, s.method === "cash" ? "Cash" : "Account", s.note,
     it.name, it.qty, it.price, it.price != null ? round2(it.price * it.qty) : null,
-    s.total, s.paid, s.total != null && s.paid != null ? round2(s.total - s.paid) : null, s.loan_fee || null, s.due_on])));
-  return toCsv(["Sale no.","Date","Time","Sold by","Money went to","How paid","Customer or note","Item","Qty","Unit price","Line total","Sale total","Paid so far","Still owed","Loan fee","Due date"], rows);
+    s.total, s.paid, s.total != null && s.paid != null ? round2(s.total - s.paid) : null, s.loan_fee || null, s.delivery_fee || null, s.due_on])));
+  return toCsv(["Sale no.","Date","Time","Sold by","Money went to","How paid","Customer or note","Item","Qty","Unit price","Line total","Sale total","Paid so far","Still owed","Loan fee","Delivery fee","Due date"], rows);
 }
 function productsCsv(d){
   const mgr = d.you && (d.you.role === "owner" || d.you.role === "partner");
@@ -1349,7 +1522,14 @@ function bindView(){
   v.querySelectorAll("[data-dodel]").forEach(b => b.onclick = () => once(b, async () => {
     try { await must(S.sb.rpc("delete_sale", {p_id: Number(b.dataset.dodel)})); S.confirmDel = null; toast("Sale deleted. Stock is back."); await refresh(); } catch(err){ failed(err); }
   }));
-  v.querySelectorAll("[data-period]").forEach(b => b.onclick = async () => { S.period = b.dataset.period; render(); await refresh(); });
+  v.querySelectorAll("[data-period]").forEach(b => b.onclick = async () => { S.period = b.dataset.period; saveRange(); render(); await refresh(); });
+  const pickRange = async () => {
+    const f = $("#rFrom").value, t = $("#rTo").value;
+    S.rFrom = f && t && t < f ? t : f; S.rTo = f && t && t < f ? f : t;      // dates the wrong way round are swapped
+    saveRange(); render(); await refresh();
+  };
+  if ($("#rFrom")){ $("#rFrom").onchange = pickRange; $("#rTo").onchange = pickRange; }
+  v.querySelectorAll("[data-rclear]").forEach(b => b.onclick = async () => { S.rFrom = ""; S.rTo = ""; saveRange(); render(); await refresh(); });
   v.querySelectorAll("[data-copyreport]").forEach(b => b.onclick = () => copyText(reportText(), "Copied. Paste it in your group."));
   v.querySelectorAll("[data-settle]").forEach(b => b.onclick = settleSheet);
   v.querySelectorAll("[data-neworder]").forEach(b => b.onclick = newOrderSheet);
@@ -1365,8 +1545,19 @@ function bindView(){
   v.querySelectorAll("[data-speriod]").forEach(b => b.onclick = () => { S.speriod = b.dataset.speriod; render(); });
   v.querySelectorAll("[data-smethod]").forEach(b => b.onclick = () => { S.smethod = b.dataset.smethod; render(); });
   v.querySelectorAll("[data-sstatus]").forEach(b => b.onclick = () => { S.sstatus = b.dataset.sstatus; render(); });
-  v.querySelectorAll("[data-sclear]").forEach(b => b.onclick = () => { S.sq = ""; S.speriod = "all"; S.smethod = "all"; S.sstatus = "all"; render(); });
+  v.querySelectorAll("[data-sclear]").forEach(b => b.onclick = () => { S.sq = ""; S.speriod = "all"; S.sfrom = ""; S.sto = ""; S.smethod = "all"; S.sstatus = "all"; render(); });
+  if ($("#sFrom")){ const f = () => { S.sfrom = $("#sFrom").value; S.sto = $("#sTo").value; if (S.sfrom && S.sto && S.sto < S.sfrom) [S.sfrom, S.sto] = [S.sto, S.sfrom]; render(); }; $("#sFrom").onchange = f; $("#sTo").onchange = f; }
+  v.querySelectorAll("[data-moresales]").forEach(b => b.onclick = () => once(b, async () => { S.salesLimit = Math.min(5000, (S.salesLimit || 300) + 500); await refresh(); }));
   const sq = $("#salesSearch"); if (sq) sq.oninput = () => { S.sq = sq.value; render(); };
+  v.querySelectorAll("[data-owedtab]").forEach(b => b.onclick = () => {
+    S.owedTab = b.dataset.owedtab; render();
+    if (S.owedTab === "history" && (!S.hist || S.histStale || S.histErr)) loadHistory();
+  });
+  v.querySelectorAll("[data-hfilter]").forEach(b => b.onclick = () => { S.hfilter = b.dataset.hfilter; render(); });
+  v.querySelectorAll("[data-hclear]").forEach(b => b.onclick = () => { S.hq = ""; S.hfilter = "all"; render(); });
+  v.querySelectorAll("[data-histretry]").forEach(b => b.onclick = () => { S.histErr = ""; render(); loadHistory(); });
+  v.querySelectorAll("[data-cust]").forEach(b => b.onclick = () => customerSheet(b.dataset.cust));
+  const hs = $("#histSearch"); if (hs) hs.oninput = () => { S.hq = hs.value; render(); };
   v.querySelectorAll("[data-pay]").forEach(b => b.onclick = () => paySheet(Number(b.dataset.pay)));
   v.querySelectorAll("[data-due]").forEach(b => b.onclick = () => dueSheet(Number(b.dataset.due)));
   v.querySelectorAll("[data-remind]").forEach(b => b.onclick = () => { const d = S.debts.find(x => x.sale_id === Number(b.dataset.remind)); if (d) copyText(reminderText(d), "Copied. Paste it in a message to them."); });

@@ -31,6 +31,7 @@ let BIZ = P.get("none") === "1" ? [] : P.get("nob2") === "1" ? [B1] : [B1, B2];
 const byBiz = (a, b) => biz => biz === "b1" ? a : b;
 const D = {
   partners: byBiz(
+    P.get("solo") === "1" ? [{id:"sibabalo",name:"Sibabalo",phone:"0821112222",role:"owner",status:"active"}] :
     [{id:"sibabalo",name:"Sibabalo",phone:"0821112222",role:"owner",status:"active"},{id:"vusi",name:"Vusi",phone:null,role:"partner",status:"active"},{id:"dokotela",name:"Dokotela",phone:"0833334444",role:"partner",status:"active"}],
     [{id:"m_fc",name:"Thabo",phone:null,role:"owner",status:"active"},{id:"m_n",name:"Nomsa",phone:null,role:"partner",status:"invited"}]),
   products: byBiz(
@@ -50,7 +51,7 @@ const UNREAD = [{business_id:"b1"},{business_id:"b1"},{business_id:"b2"}];
 const T = [
   {id:6,at:now,paid_to:"sibabalo",recorded_by:"sibabalo",method:"transfer",note:"Block C",due_on:null,whole:false,total:null,paid:null,loan_fee:null,
    items:[{name:"Black Label",qty:3,owner:"beers",price:null},{name:"Gordon's Gin",qty:1,owner:"sibabalo",price:null}]},
-  {id:5,at:now,paid_to:"vusi",recorded_by:"vusi",method:"cash",note:"Thando",due_on:plus(-2),whole:true,total:70,paid:50,loan_fee:0,
+  {id:5,at:now,paid_to:"vusi",recorded_by:"vusi",method:"cash",note:"Thando",due_on:plus(-2),whole:true,total:70,paid:50,loan_fee:0,delivery_fee:(P.get("deldb") === "1" ? 20 : 0),
    items:[{name:"Nini Mimosa",qty:2,owner:"sibabalo",price:35}]},
 ];
 const G1 = [{owner:"beers",partner_id:"dokotela",share:0.5},{owner:"beers",partner_id:"vusi",share:0.5},{owner:"sibabalo",partner_id:"sibabalo",share:1}];
@@ -79,13 +80,27 @@ const R = {
   my_businesses: () => BIZ,
   my_groups: a => a.p_biz !== "b1" ? G2 : G1,
   list_members: a => a.p_biz !== "b1" ? M2 : M1,
-  sales_timeline: a => a.p_biz !== "b1" ? [] : T,
+  sales_timeline: a => a.p_biz !== "b1" ? [] : P.get("many") === "1" ? Array.from({length: Math.min(a.p_limit, 700)}, (_, i) => Object.assign({}, T[1], {id: 100 + i})) : T,
   stock_levels: a => a.p_biz !== "b1" ? [] : [{product_id:"nini-mimosa",qty:10},{product_id:"heineken",qty:2},{product_id:"chips",qty:null}],
   my_money: a => ({received:50,received_cash:50,orders:1,me:ME,due:0,sold_value:0,outstanding:0,sold:[],
     pays: a.p_biz !== "b1" ? [] : [{from:"sibabalo",to:"dokotela",amount:160,from_ids:["sibabalo"],to_ids:["dokotela","vusi"],from_name:"Sibabalo",to_name:"Dokotela & Vusi"}]}),
   my_debts: a => a.p_biz !== "b1" ? [] : [
     {sale_id:7,at:now,customer:"Mpho",items:"1 × First Watch",total:330,paid:0,outstanding:330,due_on:plus(3),paid_to:"vusi",recorded_by:"vusi",loan_fee:50},
-    {sale_id:5,at:now,customer:"Thando",items:"2 × Nini Mimosa",total:70,paid:50,outstanding:20,due_on:plus(-2),paid_to:"vusi",recorded_by:"vusi",loan_fee:0}],
+    {sale_id:5,at:now,customer:"Thando",items:"2 × Nini Mimosa",total:70,paid:50,outstanding:20,due_on:plus(-2),paid_to:"vusi",recorded_by:"vusi",loan_fee:0,delivery_fee:(P.get("deldb") === "1" ? 20 : 0)}],
+  customer_history: a => {
+    if (P.get("nohist") === "1") return {__error:"Could not find the function busynes.customer_history(p_biz, p_limit) in the schema cache"};
+    if (P.get("failhist") === "1") return {__error:"TypeError: Failed to fetch"};
+    if (a.p_biz !== "b1") return [];
+    const T0 = Date.now(), ago = n => new Date(T0 - n * 864e5).toISOString();
+    return [
+      {sale_id:9,at:ago(1),customer:"Thando",items:"1 × Chips",total:15,paid:0,outstanding:15,due_on:null,paid_to:"vusi",recorded_by:"vusi",loan_fee:0,cleared_at:null,payments:[]},
+      {sale_id:7,at:ago(8),customer:"Mpho",items:"1 × First Watch",total:330,paid:330,outstanding:0,due_on:plus(-3),paid_to:"vusi",recorded_by:"vusi",loan_fee:50,cleared_at:ago(6),
+       payments:[{at:ago(8),amount:100,method:"cash",paid_to:"vusi"},{at:ago(6),amount:230,method:"transfer",paid_to:"vusi"}]},
+      {sale_id:5,at:ago(10),customer:"Thando",items:"2 × Nini Mimosa",total:70,paid:50,outstanding:20,due_on:plus(-2),paid_to:"vusi",recorded_by:"vusi",loan_fee:0,cleared_at:null,
+       payments:[{at:ago(10),amount:30,method:"cash",paid_to:"vusi"},{at:ago(4),amount:20,method:"transfer",paid_to:"vusi"}]},
+      {sale_id:3,at:ago(30),customer:"thando ",items:"1 × Heineken",total:40,paid:40,outstanding:0,due_on:plus(-25),paid_to:"vusi",recorded_by:"vusi",loan_fee:0,cleared_at:ago(26),
+       payments:[{at:ago(30),amount:10,method:"cash",paid_to:"vusi"},{at:ago(26),amount:30,method:"cash",paid_to:"vusi"}]}];
+  },
   create_business: a => { BIZ.push({id:"b3", name:a.p_name, kind:a.p_kind, role:"owner", member_id:"m_new", privacy:"shared", owner_name:a.p_my_name, team_settle:false, currency:a.p_currency || "R"}); return "b3"; },
   record_sale: a => a.p_note === "REJECT" ? {__error:"You can't record sales in this business"} : 7,
   delete_business: a => { BIZ = BIZ.filter(b => b.id !== a.p_biz); return null; },
@@ -98,6 +113,7 @@ function builder(table){
                 if (down()) return Promise.resolve(netErr()).then(res, rej);
                 if (table === "products" && P.get("oldprods") === "1" && /case_size/.test(cols)) return Promise.resolve({data:null, error:{message:"column products.case_size does not exist"}}).then(res, rej);
                 let d = D[table]; if (typeof d === "function") d = d(biz);
+                if (table === "stock_moves" && cols === "at") d = P.get("restock") === "1" ? [{at: new Date(Date.now() - 2 * 864e5).toISOString()}] : [];
                 if (table === "notifications" && !biz) d = UNREAD;
                 return Promise.resolve({data: d || [], error: null}).then(res, rej);
               } };
@@ -210,7 +226,7 @@ await page.screenshot({ path: (process.env.TEMP || "/tmp") + "/ui-profit.png", f
 ok(/Sibabalo pays you or Dokotela/.test(t) && /R160/.test(t), "settle-up is one line: Sibabalo pays you or Dokotela, R160 (team settle-up is on for BusyNes)");
 ok(/settle as one/.test(t), "explains that partners who run the same stock settle as one");
 ok(/Your profit/i.test(t) && /Making money/.test(t) && /R40/.test(t) && /33(\.\d+)?% of what you sell is profit/.test(t), "the Money tab shows a profit card: 'Making money', R40, 33% margin");
-ok(/Loan fees earned/.test(t) && /\+R10/.test(t) && /Profit with fees/.test(t) && /R50/.test(t), "loan fees are shown on top (R10 more, R50 in total)");
+ok(/Fees earned/.test(t) && /\+R10/.test(t) && /Profit with fees/.test(t) && /R50/.test(t), "loan fees are shown on top (R10 more, R50 in total)");
 ok(/R110 of what you sold has no cost set yet/.test(t) && /Set costs/.test(t), "items with no cost are flagged, not guessed: 'R110 ... no cost set yet'");
 ok(/Heineken/.test(t) && /no cost/.test(t) && /By product/i.test(t), "profit is listed by product, with 'no cost' where it isn't known");
 ok((await calls()).filter(c => c[0] === "my_profit").every(c => c[1].p_biz === "b1"), "profit is requested for this business only");
@@ -306,10 +322,10 @@ ok(await A.exists('[data-export="sales"]') && await A.exists('[data-export="prod
 await page.click('[data-export="sales"]'); let dl = await A.download();
 ok(dl && /^busynes-sales-\d{4}-\d\d-\d\d\.csv$/.test(dl.name), "the sales file is named after the business and the date: " + (dl && dl.name));
 ok(dl.bytes.join() === "239,187,191", "the file starts with a byte-order mark so Excel reads accents and symbols correctly");
-ok(dl.text.split("\r\n")[0] === "Sale no.,Date,Time,Sold by,Money went to,How paid,Customer or note,Item,Qty,Unit price,Line total,Sale total,Paid so far,Still owed,Loan fee,Due date", "the columns are plain and readable");
+ok(dl.text.split("\r\n")[0] === "Sale no.,Date,Time,Sold by,Money went to,How paid,Customer or note,Item,Qty,Unit price,Line total,Sale total,Paid so far,Still owed,Loan fee,Delivery fee,Due date", "the columns are plain and readable");
 ok(dl.text.includes('"\'=SUM(1,1), ""quoted"""'), "a note that starts with '=' can't run as a spreadsheet formula (it gets an apostrophe) and commas and quotes are escaped");
 const saleRows = dl.text.split("\r\n");
-ok(saleRows.length === 3 && saleRows[1].includes(",Nini Mimosa,2,35,70,70,50,20,,2026-12-01"), "every item is one row, with money worked out (2 × R35 = R70, R50 paid, R20 still owed): " + saleRows[1].slice(-60));
+ok(saleRows.length === 3 && saleRows[1].includes(",Nini Mimosa,2,35,70,70,50,20,,,2026-12-01"), "every item is one row, with money worked out (2 × R35 = R70, R50 paid, R20 still owed): " + saleRows[1].slice(-60));
 ok(saleRows[2].includes(",Black Label,3,,,,,,,"), "money you may not see is left blank, not guessed");
 await page.click('[data-export="products"]'); dl = await A.download();
 ok(dl.text.split("\r\n")[0].includes("Cost") && dl.text.includes("Heineken,40,30,Beers,No,Yes,2"), "the products file includes cost and stock for a partner");
@@ -800,6 +816,177 @@ console.log("\n17. Search and filter sales");
   await pg.click("[data-sfilter=\"mine\"]"); await sleep(80);
   ok((await n()) === 1 && /Black Label/.test(await S1.text(".sale")), "it combines with 'Mine'");
   await pg.close();
+}
+
+// ================================================================== 18. history of people who owed
+console.log("\n18. History of who owed");
+{
+  const H1 = await open("?me=sibabalo"); await H1.loaded(); const pg = H1.page; await H1.tab("owed");
+  ok(await H1.exists('[data-owedtab="now"]') && await H1.exists('[data-owedtab="history"]') && /Owing now \(2\)/.test(await H1.text()), "Who owes has two tabs: 'Owing now' (with a count) and 'History'");
+  ok(!(await H1.last("customer_history")) && /Mpho/.test(await H1.text()), "the history isn't fetched until it's asked for");
+  await pg.click('[data-owedtab="history"]'); await pg.waitForSelector("[data-cust]", { timeout: 4000 });
+  const names = await pg.$$eval("[data-cust]", els => els.map(e => e.querySelector(".title").innerText));
+  ok(names.length === 2 && names[0] === "Thando" && names[1] === "Mpho", "customers are listed once each (Thando and 'thando ' are the same person), those who still owe first: " + names.join());
+  const rowT = await H1.text('[data-cust="thando"]');
+  ok(/Owes R35/.test(rowT) && /3 times on credit/.test(rowT) && /R125 in total/.test(rowT), "Thando: owes R35 now, 3 times on credit, R125 in total: " + rowT.replace(/\s+/g, " "));
+  ok(/late 1 time/.test(rowT) && /usually pays back in 4 days/.test(rowT), "...with how they usually pay: " + rowT.replace(/\s+/g, " "));
+  const rowM = await H1.text('[data-cust="mpho"]');
+  ok(/All paid/.test(rowM) && /R330 in total/.test(rowM), "Mpho paid everything back but is still in the history");
+  ok(/given on credit/i.test(await H1.text()) && /R455/.test(await H1.text()) && /paid back/i.test(await H1.text()), "the top shows how much was given on credit and paid back");
+  await pg.click('[data-hfilter="owing"]'); await sleep(80);
+  ok((await pg.$$eval("[data-cust]", els => els.length)) === 1, "'Still owing' keeps only people who owe");
+  await pg.click('[data-hfilter="paid"]'); await sleep(80);
+  ok((await pg.$$eval("[data-cust]", els => els.length)) === 1 && /Mpho/.test(await H1.text()), "'Paid up' keeps only people who owe nothing");
+  await pg.click('[data-hfilter="all"]'); await pg.type("#histSearch", "mph"); await sleep(120);
+  ok((await pg.$$eval("[data-cust]", els => els.length)) === 1 && await pg.$eval("#histSearch", e => e === document.activeElement), "typing a name finds the customer and the box keeps focus");
+  await pg.$eval("#histSearch", e => { e.value = ""; }); await pg.type("#histSearch", "zzzz"); await sleep(120);
+  ok(/No customers match/.test(await H1.text()), "no match says so");
+  await pg.click("[data-hclear]"); await sleep(80);
+  await pg.click('[data-cust="thando"]'); await pg.waitForSelector("#stCopy");
+  const sheet = await H1.text(".sheet");
+  ok(/Thando/.test(sheet) && /Owes R35 now/.test(sheet) && /R90 paid of R125/.test(sheet), "tapping a customer opens their record: " + sheet.replace(/\s+/g, " ").slice(0, 160));
+  ok(/Paid R30 on the day/.test(sheet) && /✓ R20 on/.test(sheet) && /transfer|account/.test(sheet.toLowerCase()), "...each credit sale lists what was paid on the day and every later payment with its date");
+  ok(/Paid in full/.test(sheet) && /Still owes R20/.test(sheet) && /Still owes R15/.test(sheet), "...and says which are paid in full and which are still owed");
+  const wa = await pg.$eval(".sheet a.btn", a => decodeURIComponent(a.href));
+  ok(/wa\.me/.test(wa) && /Hi Thando, here is your account with BusyNes/.test(wa) && /Total still owing: R35/.test(wa) && /2 × Nini Mimosa/.test(wa), "'WhatsApp statement' opens a message with their whole account");
+  await pg.click("#sheetCancel"); await sleep(60);
+  ok(!(await H1.exists(".sheet")), "closing the record returns to the list");
+  await pg.click('[data-owedtab="now"]'); await sleep(80);
+  ok(/owed to you/i.test(await H1.text()) && await H1.exists("[data-pay]"), "'Owing now' is the same screen as before, with the payment buttons");
+  await pg.close();
+
+  const H2 = await open("?me=sibabalo&nohist=1"); await H2.loaded(); await H2.tab("owed"); await H2.page.click('[data-owedtab="history"]'); await sleep(250);
+  ok(/History needs one more update/.test(await H2.text()), "if the database hasn't been updated yet the History tab explains it and the rest of the app still works");
+  await H2.page.click('[data-owedtab="now"]'); await sleep(80);
+  ok(await H2.exists("[data-pay]"), "...'Owing now' still works");
+  await H2.page.close();
+
+  const H3 = await open("?me=sibabalo&failhist=1"); await H3.loaded(); await H3.tab("owed"); await H3.page.click('[data-owedtab="history"]'); await sleep(250);
+  ok(/Couldn't load the history/.test(await H3.text()) && await H3.exists("[data-histretry]"), "a connection problem offers 'try again'");
+  await H3.page.close();
+
+  const H4 = await open("?me=sibabalo&cur=%24"); await H4.loaded(); await H4.tab("owed"); await H4.page.click('[data-owedtab="history"]'); await H4.page.waitForSelector("[data-cust]");
+  ok(/\$35/.test(await H4.text('[data-cust="thando"]')) && !/R35/.test(await H4.text('[data-cust="thando"]')), "amounts use the business's currency");
+  await H4.page.close();
+
+  const H5 = await open("?role=staff"); await H5.loaded(); await H5.tab("owed"); await H5.page.click('[data-owedtab="history"]'); await H5.page.waitForSelector("[data-cust]");
+  ok(await H5.exists("[data-cust]"), "staff can open the history too (the database only returns sales they handled)");
+  await H5.page.close();
+}
+
+// ================================================================== 19. money dates, settle-up, delivery
+console.log("\n19. Money dates, settle-up only with partners, delivery fee");
+{
+  const lastMoney = async X => (await X.calls()).filter(c => c[0] === "my_money").pop()[1];
+  const M1 = await open("?me=sibabalo"); await M1.loaded(); const pg = M1.page; await M1.tab("report");
+  ok(await M1.exists('[data-period="settle"]') && await M1.exists("[data-settle]") && /to settle up/i.test(await M1.text()), "a business with partners has 'Since settle-up' and 'Mark as settled'");
+  ok(await pg.$eval('[data-period="settle"]', b => b.getAttribute("aria-pressed") === "true"), "...and starts on 'Since settle-up'");
+  const chipsT = await M1.text("#view .chips.seg");
+  ok(/Today/.test(chipsT) && /This week/.test(chipsT) && /Last week/.test(chipsT) && /This month/.test(chipsT) && /Last month/.test(chipsT) && /All time/.test(chipsT) && /Since new stock/.test(chipsT) && /Pick dates/.test(chipsT), "the period choices: " + chipsT.replace(/\s+/g, " | "));
+  await pg.click('[data-period="today"]'); await sleep(250);
+  let a = await lastMoney(M1);
+  ok(new Date(a.p_from).getTime() === new Date(new Date().setHours(0,0,0,0)).getTime() && !("p_to" in a), "'Today' counts from midnight with no end");
+  ok(/This is for today/.test(await M1.text()), "...and says the settle-up lines are for that period, not for handing over today");
+  await pg.click('[data-period="lastweek"]'); await sleep(250); a = await lastMoney(M1);
+  const wk = (new Date(a.p_to) - new Date(a.p_from)) / 864e5;
+  ok(a.p_to && Math.round(wk) === 7 && new Date(a.p_to) <= new Date() && new Date(a.p_to).getDay() === 1, "'Last week' is the 7 days before this Monday: " + a.p_from + " to " + a.p_to);
+  await pg.click('[data-period="month"]'); await sleep(250); a = await lastMoney(M1);
+  const first = new Date(new Date().getFullYear(), new Date().getMonth(), 1);
+  ok(new Date(a.p_from).getTime() === first.getTime(), "'This month' starts on the 1st");
+  await pg.click('[data-period="lastmonth"]'); await sleep(250); a = await lastMoney(M1);
+  ok(new Date(a.p_to).getTime() === first.getTime() && new Date(a.p_from) < first, "'Last month' ends where this month starts");
+  await pg.click('[data-period="all"]'); await sleep(250); a = await lastMoney(M1);
+  ok(a.p_from === null && !("p_to" in a) && /Everything since you started/.test(await M1.text()), "'All time' counts everything");
+  ok((await M1.calls()).filter(c => c[0] === "my_profit").pop()[1].p_from === null, "the profit card follows the same dates");
+
+  await pg.click('[data-period="custom"]'); await pg.waitForSelector("#rFrom");
+  ok(/Choose the dates/.test(await M1.text()), "'Pick dates' shows From and To boxes with a hint");
+  await pg.$eval("#rFrom", e => { e.value = "2026-10-01"; e.dispatchEvent(new Event("change", {bubbles: true})); }); await sleep(250);
+  await pg.$eval("#rTo", e => { e.value = "2026-10-07"; e.dispatchEvent(new Event("change", {bubbles: true})); }); await sleep(300);
+  a = await lastMoney(M1);
+  const want = await pg.evaluate(() => [new Date(new Date("2026-10-01T00:00:00").getTime() - 1).toISOString(), new Date("2026-10-07T23:59:59.999").toISOString()]);
+  ok(a.p_from === want[0] && a.p_to === want[1], "1 Oct to 7 Oct counts from the start of the 1st to the end of the 7th (both days included)");
+  ok(/Counting from 0?1 Oct 2026 to 0?7 Oct 2026/.test(await M1.text()), "...and the screen says which dates are being counted");
+  await pg.$eval("#rFrom", e => { e.value = "2026-10-09"; e.dispatchEvent(new Event("change", {bubbles: true})); }); await sleep(300);
+  ok(await pg.$eval("#rFrom", e => e.value === "2026-10-07") && await pg.$eval("#rTo", e => e.value === "2026-10-09"), "dates typed the wrong way round are swapped");
+  const M1b = await open("?me=sibabalo", undefined, true); await M1b.loaded(); await M1b.tab("report");
+  ok(await M1b.page.$eval('[data-period="custom"]', b => b.getAttribute("aria-pressed") === "true") && await M1b.page.$eval("#rFrom", e => e.value === "2026-10-07"), "the chosen dates are remembered the next time the app opens");
+  await M1b.page.click("[data-rclear]"); await sleep(300); a = await lastMoney(M1b);
+  ok(a.p_from === null && !("p_to" in a), "'Clear dates' counts everything again");
+  await M1b.page.close();
+  await pg.close();
+
+  const R1 = await open("?me=sibabalo&restock=1"); await R1.loaded(); await R1.tab("report"); await R1.page.click('[data-period="restock"]'); await sleep(300);
+  a = await lastMoney(R1); const two = Date.now() - 2 * 864e5;
+  ok(Math.abs(new Date(a.p_from) - two) < 60000 && /when stock was last added/.test(await R1.text()), "'Since new stock' counts from the last time stock was added");
+  await R1.page.close();
+  const R2 = await open("?me=sibabalo"); await R2.loaded(); await R2.tab("report"); await R2.page.click('[data-period="restock"]'); await sleep(300);
+  ok((await lastMoney(R2)).p_from === null && /No stock has been added yet/.test(await R2.text()), "with no stock added yet it says so and counts everything");
+  await R2.page.close();
+
+  const S0 = await open("?me=sibabalo&solo=1"); await S0.loaded(); await S0.tab("report");
+  ok(!(await S0.exists('[data-period="settle"]')) && !(await S0.exists("[data-settle]")) && !(await S0.exists("[data-copyreport]")) && !/to settle up/i.test(await S0.text()) && !/holding/i.test(await S0.text()), "a business with nobody else has no settle-up at all: no 'Since settle-up', no 'Mark as settled', no 'To settle up'");
+  ok(await S0.page.$eval('[data-period="all"]', b => b.getAttribute("aria-pressed") === "true") && (await lastMoney(S0)).p_from === null, "...and starts on all time, not since a settle-up");
+  ok(/sales paid/i.test(await S0.text()) && !/your share collected/i.test(await S0.text()), "...showing sales paid instead of 'your share'");
+  await S0.page.click('[data-period="week"]'); await sleep(250);
+  ok(!(await S0.exists("[data-settle]")), "choosing another period doesn't bring it back");
+  await S0.page.close();
+
+  const S3 = await open("?role=staff"); await S3.loaded(); await S3.tab("report");
+  ok(await S3.exists('[data-period="settle"]') && !(await S3.exists("[data-settle]")), "staff in a business with partners see the settle-up lines but not the button");
+  await S3.page.close();
+
+  // ---- delivery fee
+  const D1 = await open("?me=sibabalo"); await D1.loaded(); const dp = D1.page;
+  await dp.click('[data-add="heineken"]'); await dp.click('[data-add="heineken"]'); await dp.click("#cartNext"); await dp.waitForSelector("#saveSale");
+  ok(await D1.exists("#delToggle") && await dp.$eval("#delFields", e => e.hidden) && /Save sale · R80/.test(await D1.text("#saveSale")), "the checkout has a 'Charge a delivery fee' choice, off by default (2 × R40 = R80)");
+  await dp.click("#delToggle"); await dp.type("#delAmt", "20"); await sleep(60);
+  ok(/Save sale · R100/.test(await D1.text("#saveSale")) && /Delivery/.test(await D1.text("#delLine")) && /R100/.test(await D1.text("#sheetTotal")), "R20 delivery makes the total R100 and shows a Delivery line");
+  ok(await dp.$eval("#feeToBox", e => !e.hidden) && /delivery fee/.test(await D1.text("#feeToLab")), "'Who keeps the delivery fee?' appears");
+  await dp.click('[data-feeto="vusi"]'); await dp.click("#saveSale"); await sleep(250);
+  let rs = await D1.last("record_sale");
+  ok(rs[1].p_delivery_fee === 20 && rs[1].p_fee === 0 && rs[1].p_fee_to === "vusi" && rs[1].p_paid === 100, "the sale is saved with a R20 delivery fee going to Vusi, paid R100 in full");
+  await dp.click('[data-add="heineken"]'); await dp.click("#cartNext"); await dp.waitForSelector("#saveSale"); await dp.click("#delToggle");
+  ok(await dp.$eval("#delAmt", e => e.value === "20"), "next time the fee you usually charge is filled in for you");
+  await dp.click("#delToggle"); await dp.click("#saveSale"); await sleep(250);
+  rs = await D1.last("record_sale"); ok(!("p_delivery_fee" in rs[1]) && rs[1].p_fee_to === null, "a sale without delivery sends no delivery fee");
+  await dp.click('[data-add="heineken"]'); await dp.click("#cartNext"); await dp.waitForSelector("#saveSale");
+  await dp.click("#delToggle"); await dp.$eval("#delAmt", e => { e.value = ""; }); await dp.type("#delAmt", "15"); await dp.click('[data-mode="credit"]'); await dp.type("#saleNote", "Nandi");
+  ok(/R55 owed/.test(await D1.text("#saveSale")) && /R40 \+ R15 delivery/.test(await D1.text("#owedNote")), "on credit, delivery is part of what the customer owes: R55 (R40 + R15 delivery)");
+  await dp.click("#sheetCancel");
+  await dp.close();
+
+  const D2 = await open("?me=sibabalo&deldb=1"); await D2.loaded(); await D2.tab("owed");
+  ok(/Delivery · R20/.test(await D2.text()), "'Who owes' marks a sale that includes delivery");
+  await D2.tab("sales"); ok(/Delivery R20/.test(await D2.text()), "the Sales list shows the delivery fee too");
+  await D2.page.close();
+}
+
+// ================================================================== 20. sales: pick dates, older sales
+console.log("\n20. Sales: pick dates and older sales");
+{
+  const Q = await open("?me=sibabalo"); await Q.loaded(); const pg = Q.page; await Q.tab("sales");
+  const n = () => pg.$$eval(".sale", els => els.length);
+  await pg.click('[data-speriod="custom"]'); await pg.waitForSelector("#sFrom");
+  ok((await n()) === 2, "'Pick dates' with no dates chosen shows every sale");
+  const day = k => pg.evaluate(k => { const d = new Date(); d.setDate(d.getDate() + k); return d.getFullYear() + "-" + String(d.getMonth()+1).padStart(2,"0") + "-" + String(d.getDate()).padStart(2,"0"); }, k);
+  const setDates = async (f, t) => { await pg.$eval("#sFrom", (e, v) => { e.value = v; }, f); await pg.$eval("#sTo", (e, v) => { e.value = v; e.dispatchEvent(new Event("change", {bubbles: true})); }, t); await sleep(120); };
+  await setDates(await day(-5), await day(-3));
+  ok((await n()) === 0 && /No sales match/.test(await Q.text()), "dates in the past before today's sales show nothing");
+  await setDates(await day(-1), await day(0));
+  ok((await n()) === 2, "dates that include today show today's sales");
+  await setDates(await day(0), await day(-1));
+  ok(await pg.$eval("#sFrom", e => e.value) === await day(-1) && (await n()) === 2, "dates the wrong way round are swapped");
+  await pg.click("[data-sclear]"); await sleep(100);
+  ok((await n()) === 2 && !(await Q.exists("#sFrom")), "'Clear search' also clears the dates");
+  ok(!(await Q.exists("[data-moresales]")), "with few sales there is no 'Show older sales'");
+  await pg.close();
+
+  const Y = await open("?me=sibabalo&many=1"); await Y.loaded(); await Y.tab("sales");
+  ok(await Y.exists("[data-moresales]") && /latest 300 sales/.test(await Y.text()), "when the list is full it offers 'Show older sales'");
+  await Y.page.click("[data-moresales]"); await sleep(300);
+  ok((await Y.last("sales_timeline"))[1].p_limit === 800 && !(await Y.exists("[data-moresales]")), "tapping it asks for more (800) and the button goes once everything is shown");
+  await Y.page.close();
 }
 
 // ================================================================== done
