@@ -579,4 +579,34 @@ T.ok((await h.err("dlsolo", `select busynes.mark_settled('${SB}')`)) !== null, "
 await invite("dlsolo", SB, "partner2@x.com", "Pat", "partner", "everyone", 0);
 T.ok((await h.err("dlsolo", `select busynes.mark_settled('${SB}')`)) === null, "...once there is a partner it works");
 
+// ============================================================ S. counting from new stock
+T.section("S. Start counting from new stock");
+for (const [n, e] of [["fr", "fr@x.com"], ["frstaff", "frstaff@x.com"]]) await h.addUser(n, e);
+const FB = (await one("fr", `select busynes.create_business('Fresh Co', '', 'Fran') id`)).id;
+const frOwner = (await rows("fr", "select * from busynes.my_businesses()")).find(b => b.id === FB).member_id;
+const frTea = (await one("fr", `select busynes.add_product('${FB}', 'Tea', 50, 'everyone', true, 30) id`)).id;
+await invite("fr", FB, "frstaff@x.com", "Sid", "staff");
+await sale("fr", FB, [{ product_id: frTea, qty: 4 }], frOwner, { at: ago(5) });
+const freshOf = async who => (await rows(who, `select fresh_from from busynes.businesses where id = '${FB}'`))[0];
+const since = async from => (await one("fr", `select busynes.my_money($1::uuid, $2::timestamptz) m`, [FB, from])).m;
+T.ok((await freshOf("fr")).fresh_from === null, "a business starts with no new count");
+await q("fr", `select busynes.set_fresh_start('${FB}')`);
+let ff = (await freshOf("fr")).fresh_from;
+T.ok(ff && Math.abs(new Date(ff) - Date.now()) < 60000, "'now' uses the server's clock");
+T.ok(Number((await since(ff)).received) === 0, "money counted from the new start is R0");
+await sale("fr", FB, [{ product_id: frTea, qty: 1 }], frOwner);
+const pNew = (await one("fr", `select busynes.my_profit($1::uuid, $2::timestamptz) p`, [FB, ff])).p;
+T.ok(Number((await since(ff)).received) === 50 && T.near(pNew.profit, 20), "only the new sale counts: R50 received, R20 profit");
+T.ok(Number((await since(null)).received) === 250 && (await rows("fr", `select * from busynes.sales_timeline('${FB}')`)).length === 2, "nothing is deleted: all time is still R250 and both sales are there");
+T.ok((await freshOf("frstaff")).fresh_from !== null, "everyone in the business sees the same starting point");
+T.ok((await rows("thabo", `select fresh_from from busynes.businesses where id = '${FB}'`)).length === 0, "people outside the business can't read it");
+T.ok(/Only the owner and partners/.test((await h.err("frstaff", `select busynes.set_fresh_start('${FB}')`)) || ""), "staff can't start a new count");
+T.ok((await h.err("thabo", `select busynes.set_fresh_start('${FB}', null, true)`)) !== null, "an outsider can't change it");
+T.ok(/future/.test((await h.err("fr", `select busynes.set_fresh_start('${FB}', now() + interval '2 days')`)) || ""), "the start can't be in the future");
+await q("fr", `select busynes.set_fresh_start('${FB}', '${ago(6)}')`);
+T.ok(Number((await since((await freshOf("fr")).fresh_from)).received) === 250, "an earlier day can be chosen");
+await q("fr", `select busynes.set_fresh_start('${FB}', null, true)`);
+T.ok((await freshOf("fr")).fresh_from === null, "'show everything again' clears it");
+T.ok((await db.query(`select count(*)::int n from busynes.settlements where business_id = '${FB}'`)).rows[0].n === 0, "none of this counts as a settle-up");
+
 process.exit(T.done());

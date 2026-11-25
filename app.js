@@ -5,7 +5,7 @@
 (() => {
 "use strict";
 
-const VERSION = "3.7";
+const VERSION = "3.8";
 const LOW = 3;               // "running low" threshold
 const POLL_MS = 20000;       // refresh while the app is open
 const OWNER_COLORS = ["var(--beer)", "var(--sib)", "var(--bottle)", "var(--warn)"]; // given to owner groups in order
@@ -17,7 +17,7 @@ const S = {
   partners: [], shares: [], products: [], stock: {}, moves: [], sales: [], settlements: [], money: null,
   orders: [], debts: [], notifs: [], messages: [], seenNotif: null, fromOrder: null, salesFilter: "all", sq: "", speriod: "all", smethod: "all", sstatus: "all", orderFees: {}, costs: {}, profit: null,
   owedTab: "now", hist: null, histStale: true, histErr: "", hq: "", hfilter: "all",
-  sfrom: "", sto: "", salesLimit: 300, rFrom: "", rTo: "", lastRestock: null,
+  sfrom: "", sto: "", salesLimit: 300, rFrom: "", rTo: "", lastRestock: null, freshFrom: null,
   tab: "sell", cart: {}, period: "auto", editing: null, confirmDel: null, loaded: false, offline: false,
 };
 const store = {
@@ -123,10 +123,11 @@ function show(id){
 
 // ---------- data ----------
 // The time span the My money screen counts. Which one is chosen is remembered for each business.
-// "auto" means: since the last settle-up if the business has partners to settle with, otherwise all time.
+// "auto" means: since the last settle-up if the business has partners to settle with. Otherwise since the new stock
+// if a new count was started, or else all time.
 const hasTeam = () => S.partners.some(p => p.id !== S.me && p.role !== "delivery");
 function curPeriod(){
-  const p = S.period === "auto" ? (hasTeam() ? "settle" : "all") : S.period;
+  const p = S.period === "auto" ? (hasTeam() ? "settle" : S.freshFrom ? "restock" : "all") : S.period;
   return p === "settle" && !hasTeam() ? "all" : p;
 }
 const startOfDay = d => { const x = new Date(d); x.setHours(0,0,0,0); return x; };
@@ -139,7 +140,7 @@ function periodRange(){
   if (p === "month") return {from: iso(new Date(now.getFullYear(), now.getMonth(), 1))};
   if (p === "lastmonth") return {from: iso(new Date(now.getFullYear(), now.getMonth() - 1, 1)), to: iso(new Date(now.getFullYear(), now.getMonth(), 1))};
   if (p === "settle") return {from: S.settlements[0] ? S.settlements[0].at : null};
-  if (p === "restock") return {from: S.lastRestock || null};
+  if (p === "restock") return {from: S.freshFrom || S.lastRestock || null};
   if (p === "custom") return {
     from: S.rFrom ? new Date(new Date(S.rFrom + "T00:00:00").getTime() - 1).toISOString() : null,
     to: S.rTo ? new Date(S.rTo + "T23:59:59.999").toISOString() : null};
@@ -150,6 +151,7 @@ const rangeArgs = (b, r) => { const a = {p_biz: b, p_from: r.from || null}; if (
 function periodText(){
   const p = curPeriod(), d = x => new Date(x + "T12:00:00").toLocaleDateString("en-ZA", {day:"numeric", month:"short", year:"numeric"});
   if (p === "custom") return S.rFrom && S.rTo ? "from " + d(S.rFrom) + " to " + d(S.rTo) : S.rFrom ? "from " + d(S.rFrom) : S.rTo ? "until " + d(S.rTo) : "all time";
+  if (p === "restock" && S.freshFrom) return "since your new stock";
   return {settle:"since the last settle-up", today:"today", week:"this week", lastweek:"last week", month:"this month", lastmonth:"last month", all:"all time", restock:"since stock was last added"}[p];
 }
 function saveRange(){ store.set("busynes.range." + bid(), JSON.stringify({period: S.period, from: S.rFrom, to: S.rTo})); }
@@ -266,7 +268,7 @@ const cap = s => s.charAt(0).toUpperCase() + s.slice(1);
 const PACK_LIST = `<datalist id="packNames">${["pack", "case", "box", "bag", "tray", "crate", "carton", "bundle", "dozen"].map(x => `<option value="${x}">`).join("")}</datalist>`;
 async function loadAll(){
   const sb = S.sb, b = bid(), full = canSell();
-  const [partners, shares, orders, notifs, messages, fees, unread] = await Promise.all([
+  const [partners, shares, orders, notifs, messages, fees, unread, bizRow] = await Promise.all([
     must(sb.from("partners").select("id,name,phone,role,status").eq("business_id", b).neq("status","removed")),
     must(sb.rpc("my_groups", {p_biz: b})),
     must(sb.from("orders").select("*").eq("business_id", b).order("at",{ascending:false}).limit(60)),
@@ -274,7 +276,9 @@ async function loadAll(){
     must(sb.from("messages").select("id,at,from_partner,body").eq("business_id", b).order("id",{ascending:false}).limit(60)),
     soft(sb.from("order_fees").select("order_id,fee"), []),
     soft(sb.from("notifications").select("business_id").is("read_at", null).limit(300), []),
+    soft(sb.from("businesses").select("fresh_from").eq("id", b), []),     // empty on a database that isn't updated yet
   ]);
+  S.freshFrom = (bizRow && bizRow[0] && bizRow[0].fresh_from) || null;
   let products = [], stock = [], moves = [], sales = [], settlements = [], debts = [], restock = [];
   if (full){
     [products, stock, moves, sales, settlements, debts, restock] = await Promise.all([
@@ -356,7 +360,7 @@ async function openBusiness(id, keepTab){
   const b = S.businesses.find(x => x.id === id); if (!b) return;
   S.biz = b; S.me = b.member_id; store.set("busynes.biz", id);
   Object.assign(S, {partners:[], shares:[], products:[], stock:{}, moves:[], sales:[], settlements:[], money:null, orders:[], debts:[], notifs:[],
-    messages:[], seenNotif:null, fromOrder:null, orderFees:{}, costs:{}, profit:null, cart:{}, loaded:false, editing:null, confirmDel:null, members:null, salesFilter:"all", sq:"", speriod:"all", smethod:"all", sstatus:"all", period:"auto", owedTab:"now", hist:null, histStale:true, histErr:"", hq:"", hfilter:"all", sfrom:"", sto:"", salesLimit:300, rFrom:"", rTo:"", lastRestock:null});
+    messages:[], seenNotif:null, fromOrder:null, orderFees:{}, costs:{}, profit:null, cart:{}, loaded:false, editing:null, confirmDel:null, members:null, salesFilter:"all", sq:"", speriod:"auto", smethod:"all", sstatus:"all", period:"auto", owedTab:"now", hist:null, histStale:true, histErr:"", hq:"", hfilter:"all", sfrom:"", sto:"", salesLimit:300, rFrom:"", rTo:"", lastRestock:null, freshFrom:null});
   loadRange();
   draft = freshDraft();
   // Switching business lands on a normal start screen; opening the app again keeps where you were.
@@ -906,6 +910,7 @@ function viewStock(){
   let h = `<div class="row"><h2>Stock on hand</h2><span class="spacer"></span>${canManage() ? `<button class="btn small" type="button" data-newprod>Add product</button>` : ""}</div>
     <p class="muted" style="margin:-12px 0 0">Stock drops by itself with every sale. Add stock when you buy more, or do a stock count to correct it.</p>`;
   if (!S.products.length) return h + `<div class="empty"><b>No products yet</b>${canManage() ? "Tap Add product to set up the first thing you sell." : "The owner hasn't added any products yet."}</div>`;
+  if (canManage()) h += freshCard();
   for (const o of Object.values(os)){
     const list = S.products.filter(p => p.owner === o.id); if (!list.length) continue;
     h += `<section class="card">${single ? "" : `<div class="owner-head"><span class="owner-tag"><i style="background:${o.color}"></i>${esc(o.name)}'s</span></div>`}<div class="list">`;
@@ -923,6 +928,46 @@ function viewStock(){
     }).join("") + `</div></section>`;
   }
   return h;
+}
+
+// "Start counting from new stock": begin the amounts again for a new batch, without deleting anything.
+const sinceText = iso => dayLabel(iso) + " at " + timeLabel(iso);
+function freshCard(){
+  return `<section class="card" id="freshCard"><div class="eyebrow">New stock count</div>
+    ${S.freshFrom ? `<p style="margin:6px 0 0">Counting since <b>${sinceText(S.freshFrom)}</b>. Sales and My money show amounts from then.</p>
+      <div class="row" style="margin-top:12px"><button class="btn small" type="button" data-fresh>Start again for newer stock</button><span class="spacer"></span><button class="linkbtn" type="button" data-freshoff>Show everything again</button></div>`
+    : `<p style="margin:6px 0 0">Bought new stock? Start the sales and profit amounts again from ${money(0)}. Your old sales stay saved.</p>
+      <button class="btn small" type="button" data-fresh style="margin-top:12px">Start counting from new stock</button>`}</section>`;
+}
+async function saveFresh(args){
+  try { await must(S.sb.rpc("set_fresh_start", Object.assign({p_biz: bid()}, args))); }
+  catch(e){
+    if (/could not find the function|schema cache/i.test((e && e.message) || "")) throw new Error("This needs the latest database update first.");
+    throw e;
+  }
+}
+function freshSheet(){
+  let when = "now";
+  openSheet(`<div class="grab"></div><h2>Start counting from new stock?</h2>
+    <p style="margin:0">Sales and My money will start again from ${money(0)} and count only what you sell from the time you choose.</p>
+    <p class="muted" style="margin:0">Nothing is deleted. You can see earlier sales any time with "Any time" on Sales or "All time" on My money. Stock and money that customers owe you stay as they are.${hasTeam() ? " Settle-ups don't change either. The new count is for everyone in the business." : ""}</p>
+    <div class="field"><span class="lab">Count from</span><div class="chips" role="group">${[["now","Now"],["today","Start of today"],["day","Another day"]].map(([k,l]) => `<button type="button" class="chip" data-freshwhen="${k}" aria-pressed="${k === "now"}">${l}</button>`).join("")}</div></div>
+    <div class="field" id="freshDayBox" hidden><label for="freshDay">The day you got the new stock</label><input id="freshDay" class="text" type="date" max="${dayKey(new Date())}"></div>
+    <div class="row"><button class="btn ghost" type="button" id="sheetCancel">Cancel</button><span class="spacer"></span><button class="btn" type="button" id="doFresh">Start counting</button></div>`);
+  $("#sheetCancel").onclick = closeSheet;
+  document.querySelectorAll("[data-freshwhen]").forEach(b => b.onclick = () => {
+    when = b.dataset.freshwhen; $("#freshDayBox").hidden = when !== "day";
+    document.querySelectorAll("[data-freshwhen]").forEach(x => x.setAttribute("aria-pressed", String(x === b)));
+  });
+  const go = $("#doFresh");
+  go.onclick = () => once(go, async () => {
+    const day = $("#freshDay").value;
+    if (when === "day" && !day) return toast("Choose the day.");
+    // "Now" is left to the server's clock, in case the phone's clock is wrong.
+    const args = when === "now" ? {} : {p_at: (when === "today" ? startOfDay(new Date()) : new Date(day + "T00:00:00")).toISOString()};
+    try { await saveFresh(args); closeSheet(); S.period = "restock"; S.speriod = "auto"; saveRange(); toast("Counting from your new stock."); await refresh(); }
+    catch(err){ failed(err); }
+  });
 }
 
 // Update one product: add new stock, correct the count, or (owners and partners) change its details.
@@ -1088,28 +1133,42 @@ function saleOwes(s){ return s.whole && s.total != null && s.paid != null ? num(
 function viewSales(){
   const mine = x => x.paid_to === S.me || x.recorded_by === S.me;
   const base = S.salesFilter === "mine" ? S.sales.filter(mine) : S.sales;
-  const custom = S.speriod === "custom";
-  const since = custom ? (S.sfrom ? new Date(S.sfrom + "T00:00:00").getTime() : 0) : {today: new Date().setHours(0,0,0,0), week: Date.now() - 7*864e5, month: Date.now() - 30*864e5}[S.speriod];
-  const until = custom && S.sto ? new Date(S.sto + "T23:59:59.999").getTime() : 0;
   const q = (S.sq || "").trim();
+  // With a new stock count running, Sales starts on that. Searching looks through everything.
+  let sp = S.speriod === "auto" ? (S.freshFrom && !q ? "fresh" : "all") : S.speriod;
+  if (sp === "fresh" && !S.freshFrom) sp = "all";
+  const custom = sp === "custom";
+  const since = custom ? (S.sfrom ? new Date(S.sfrom + "T00:00:00").getTime() : 0) : {fresh: S.freshFrom ? new Date(S.freshFrom).getTime() : 0, today: new Date().setHours(0,0,0,0), week: Date.now() - 7*864e5, month: Date.now() - 30*864e5}[sp];
+  const until = custom && S.sto ? new Date(S.sto + "T23:59:59.999").getTime() : 0;
   const list = base.filter(s => (!since || new Date(s.at).getTime() >= since) && (!until || new Date(s.at).getTime() <= until) && (S.smethod === "all" || s.method === (S.smethod === "cash" ? "cash" : "transfer"))
     && (S.sstatus === "all" || saleOwes(s) > 0.005) && (!q || saleMatches(s, q)));
-  const filtering = !!q || S.speriod !== "all" || S.smethod !== "all" || S.sstatus !== "all";
+  const filtering = !!q || (sp !== "all" && sp !== "fresh") || S.smethod !== "all" || S.sstatus !== "all";
   const chips = (key, attr, opts) => `<div class="chips seg" role="group">${opts.map(([k,l]) => `<button type="button" class="chip" data-${attr}="${k}" aria-pressed="${S[key]===k}">${l}</button>`).join("")}</div>`;
   let h = `<h2>Sales</h2><p class="muted" style="margin:-12px 0 0">Everything that's been sold, newest first: what, when, who sold it and where the money went. Amounts only show for your own products and for sales you handled${S.biz.privacy === "shared" && canManage() ? ", plus everything else if you're an owner or partner" : ""}.</p>
     <div class="chips" role="group">${[["all","Everyone's"],["mine","Mine"]].map(([k,l]) => `<button type="button" class="chip" data-sfilter="${k}" aria-pressed="${S.salesFilter===k}">${l}</button>`).join("")}</div>
     <input id="salesSearch" class="text" type="search" placeholder="Search: item, customer, person, amount..." aria-label="Search sales" autocomplete="off" value="${esc(S.sq || "")}">
-    ${chips("speriod", "speriod", [["all","Any time"],["today","Today"],["week","7 days"],["month","30 days"],["custom","Pick dates"]])}
+    <div class="chips seg" role="group">${[...(S.freshFrom ? [["fresh","New stock"]] : []), ["all","Any time"],["today","Today"],["week","7 days"],["month","30 days"],["custom","Pick dates"]].map(([k,l]) => `<button type="button" class="chip" data-speriod="${k}" aria-pressed="${sp===k}">${l}</button>`).join("")}</div>
     ${custom ? `<div class="daterow"><div class="field"><label for="sFrom">From</label><input id="sFrom" class="text" type="date" value="${esc(S.sfrom)}" max="${dayKey(new Date())}"></div>
       <div class="field"><label for="sTo">To</label><input id="sTo" class="text" type="date" value="${esc(S.sto)}" max="${dayKey(new Date())}"></div></div>` : ""}
     ${chips("smethod", "smethod", [["all","Cash + account"],["cash","Cash"],["transfer","Account"]])}
     ${chips("sstatus", "sstatus", [["all","All sales"],["owing","Still owing"]])}`;
   h += offlineBanner();
+  if (sp === "fresh" && !filtering){
+    const sum = list.reduce((x, s) => x + (s.whole && s.total != null ? num(s.total) : (s.items || []).filter(i => i.price != null).reduce((y, i) => y + num(i.price) * i.qty, 0)), 0);
+    const owing = list.reduce((x, s) => x + Math.max(0, saleOwes(s)), 0);
+    // Only the latest sales are loaded. If they don't reach back to the starting point, the total isn't complete yet.
+    const partial = S.sales.length >= (S.salesLimit || 300) && S.sales.every(s => new Date(s.at).getTime() >= since);
+    h += `<section class="card" id="freshSum"><div class="eyebrow">Sold since your new stock</div>
+      <div class="num" style="font-size:30px;font-weight:800;margin-top:4px">${money2(sum)}</div>
+      <p class="muted" style="margin:2px 0 0">${list.length} sale${list.length === 1 ? "" : "s"} since ${sinceText(S.freshFrom)}${owing > 0.005 ? " · " + money2(owing) + " still owed" : ""}${partial ? " · only your latest sales are added up here, tap Show older sales below" : ""}</p>
+      <p class="muted" style="margin:8px 0 0;font-size:13px">Earlier sales are saved. <button class="linkbtn" type="button" data-speriod="all">See all sales</button></p></section>`;
+  }
   if (filtering){
     const total = list.reduce((x, s) => { const it = (s.items || []).filter(i => i.price != null); return x + (s.whole && s.total != null ? num(s.total) : it.reduce((y, i) => y + num(i.price) * i.qty, 0)); }, 0);
     h += `<p class="muted salescount" style="margin:0"><b>${list.length}</b> sale${list.length === 1 ? "" : "s"}${list.length ? " · " + money2(total) : ""} <button class="linkbtn" type="button" data-sclear>Clear search</button></p>`;
   }
   if (!list.length) return h + (filtering ? `<div class="empty"><b>No sales match</b>Try a different word, or clear the search.</div>`
+    : sp === "fresh" ? `<div class="empty"><b>Nothing sold from the new stock yet</b>Your next sale shows up here.</div>`
     : `<div class="empty"><b>No sales to show yet</b>${S.salesFilter === "mine" ? "Sales you recorded or were paid for will show here." : "Sales recorded by anyone in the business will show here."}</div>`);
   let cur = "";
   for (const s of list){
@@ -1142,6 +1201,7 @@ function viewReport(){
   let h = `<h2>My money</h2><div class="chips seg">${periods.map(([k,l]) => `<button type="button" class="chip" data-period="${k}" aria-pressed="${cp===k}">${l}</button>`).join("")}</div>`;
   const note = t => `<p class="muted" style="margin:-8px 0 0">${t}</p>`;
   if (cp === "settle") h += note(S.settlements[0] ? "Counting from the settle-up on " + dayLabel(S.settlements[0].at) + " at " + timeLabel(S.settlements[0].at) + "." : "No settle-ups yet, so this counts every sale.");
+  else if (cp === "restock" && S.freshFrom) h += note("Counting from " + sinceText(S.freshFrom) + ", when your new stock count started. Money received also includes older debts paid since then. Earlier money is under All time.");
   else if (cp === "restock") h += note(S.lastRestock ? "Counting from " + dayLabel(S.lastRestock) + " at " + timeLabel(S.lastRestock) + ", when stock was last added." : "No stock has been added yet, so this counts every sale.");
   else if (cp === "custom") h += `<div class="daterow"><div class="field"><label for="rFrom">From</label><input id="rFrom" class="text" type="date" value="${esc(S.rFrom)}" max="${dayKey(new Date())}"></div>
       <div class="field"><label for="rTo">To</label><input id="rTo" class="text" type="date" value="${esc(S.rTo)}" max="${dayKey(new Date())}"></div></div>
@@ -1532,6 +1592,10 @@ function bindView(){
   v.querySelectorAll("[data-rclear]").forEach(b => b.onclick = async () => { S.rFrom = ""; S.rTo = ""; saveRange(); render(); await refresh(); });
   v.querySelectorAll("[data-copyreport]").forEach(b => b.onclick = () => copyText(reportText(), "Copied. Paste it in your group."));
   v.querySelectorAll("[data-settle]").forEach(b => b.onclick = settleSheet);
+  v.querySelectorAll("[data-fresh]").forEach(b => b.onclick = freshSheet);
+  v.querySelectorAll("[data-freshoff]").forEach(b => b.onclick = () => once(b, async () => {
+    try { await saveFresh({p_clear: true}); S.period = "auto"; S.speriod = "auto"; saveRange(); toast("Showing everything again."); await refresh(); } catch(err){ failed(err); }
+  }));
   v.querySelectorAll("[data-neworder]").forEach(b => b.onclick = newOrderSheet);
   v.querySelectorAll("[data-fillorder]").forEach(b => b.onclick = () => fillFromOrder(Number(b.dataset.fillorder)));
   v.querySelectorAll("[data-cancelorder]").forEach(b => b.onclick = () => once(b, async () => {
@@ -1545,7 +1609,7 @@ function bindView(){
   v.querySelectorAll("[data-speriod]").forEach(b => b.onclick = () => { S.speriod = b.dataset.speriod; render(); });
   v.querySelectorAll("[data-smethod]").forEach(b => b.onclick = () => { S.smethod = b.dataset.smethod; render(); });
   v.querySelectorAll("[data-sstatus]").forEach(b => b.onclick = () => { S.sstatus = b.dataset.sstatus; render(); });
-  v.querySelectorAll("[data-sclear]").forEach(b => b.onclick = () => { S.sq = ""; S.speriod = "all"; S.sfrom = ""; S.sto = ""; S.smethod = "all"; S.sstatus = "all"; render(); });
+  v.querySelectorAll("[data-sclear]").forEach(b => b.onclick = () => { S.sq = ""; S.speriod = "auto"; S.sfrom = ""; S.sto = ""; S.smethod = "all"; S.sstatus = "all"; render(); });
   if ($("#sFrom")){ const f = () => { S.sfrom = $("#sFrom").value; S.sto = $("#sTo").value; if (S.sfrom && S.sto && S.sto < S.sfrom) [S.sfrom, S.sto] = [S.sto, S.sfrom]; render(); }; $("#sFrom").onchange = f; $("#sTo").onchange = f; }
   v.querySelectorAll("[data-moresales]").forEach(b => b.onclick = () => once(b, async () => { S.salesLimit = Math.min(5000, (S.salesLimit || 300) + 500); await refresh(); }));
   const sq = $("#salesSearch"); if (sq) sq.oninput = () => { S.sq = sq.value; render(); };
@@ -1643,7 +1707,8 @@ async function stockMove(pid, kind, raw, rawCost){
   try {
     const cost = kind === "add" ? parseFloat(rawCost) : NaN;
     await must(S.sb.rpc("add_stock_move", Object.assign({p_biz: bid(), p_product: pid, p_kind: kind, p_qty: qty}, cost >= 0 ? {p_cost: cost} : {})));
-    S.editing = null; closeSheet(); toast(kind === "add" ? "Added " + qty + " to stock." : "Stock set to " + qty + ".");
+    S.editing = null; closeSheet(); toast(kind === "add" ? "Added " + qty + " to stock." : "Stock set to " + qty + ".",
+      kind === "add" && canManage() ? {label: "Start new count", run: () => { const t = $(".toast"); if (t) t.remove(); freshSheet(); }} : null);
     await refresh();
   } catch(err){ failed(err); }
 }

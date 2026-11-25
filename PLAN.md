@@ -255,6 +255,7 @@ Scaling plan: do nothing, watch the dashboard, buy Supabase Pro at the first pay
 | 2026-10-28 | Plan written. Nothing started yet. |
 | 2026-11-06 | v3.6 History of who owed (Who owes > History). |
 | 2026-11-23 | v3.7 My money for any dates, settle-up only with partners, delivery fee, pick dates on Sales. |
+| 2026-11-26 | v3.8 "Start counting from new stock" button on the Stock tab. |
 
 ---
 

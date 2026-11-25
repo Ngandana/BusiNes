@@ -205,6 +205,8 @@ create table if not exists push_subscriptions (
 );
 
 -- ---------------------------------------------------------------- version 3: columns for many businesses
+-- "Start counting from new stock": the app shows amounts from this moment. Nothing is deleted or settled by it.
+alter table businesses add column if not exists fresh_from timestamptz;
 alter table businesses add column if not exists team_settle boolean not null default false;
 alter table businesses add column if not exists currency text not null default 'R' check (length(btrim(currency)) between 1 and 4);   -- the symbol shown with amounts
 alter table partners add column if not exists business_id uuid references businesses(id);
@@ -893,6 +895,19 @@ begin
   perform notify_all(p_biz, 'settle', my_name || ' marked everything as settled', 'Balances start again from zero.', null, me, array['owner','partner','staff']);
 end $$;
 
+-- Start the amounts again for a new batch of stock (p_at = from when, null = now), or p_clear = true to show everything
+-- again. It only moves the starting point of what the app shows: sales, debts, stock and settle-ups are not touched.
+create or replace function set_fresh_start(p_biz uuid, p_at timestamptz default null, p_clear boolean default false) returns timestamptz
+language plpgsql security definer set search_path = busynes as $$
+declare start_at timestamptz;
+begin
+  if not has_role(p_biz, array['owner','partner']) then raise exception 'Only the owner and partners can start a new count'; end if;
+  if p_at is not null and p_at > now() + interval '5 minutes' then raise exception 'The starting date can''t be in the future'; end if;
+  if not coalesce(p_clear, false) then start_at := least(coalesce(p_at, now()), now()); end if;
+  update businesses set fresh_from = start_at where id = p_biz;
+  return start_at;
+end $$;
+
 -- ---------------------------------------------------------------- sales
 -- Record a sale. Prices come from the products table, not from the phone.
 -- p_items: [{"product_id": "p123", "qty": 2}, ...]
@@ -1577,7 +1592,7 @@ grant execute on function
   remove_member(uuid, text), leave_business(uuid), set_group_shares(uuid, text, jsonb), delete_group(uuid, text),
   add_product(uuid, text, numeric, text, boolean, numeric, int, text), update_product(text, text, numeric, boolean, boolean, numeric, int, text),
   add_stock_move(uuid, text, text, int, numeric), product_costs(uuid), my_profit(uuid, timestamptz, timestamptz),
-  stock_levels(uuid), mark_settled(uuid), export_data(uuid),
+  stock_levels(uuid), mark_settled(uuid), set_fresh_start(uuid, timestamptz, boolean), export_data(uuid),
   record_sale(uuid, jsonb, text, text, text, numeric, date, bigint, numeric, text, uuid, timestamptz, numeric),
   record_payment(bigint, numeric, text, text), set_sale_due(bigint, date), delete_sale(bigint),
   my_debts(uuid), customer_history(uuid, int), sales_timeline(uuid, int),

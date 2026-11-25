@@ -78,6 +78,10 @@ const R = {
   product_costs: a => (a.p_biz !== "b1" || PROFIT === "none") ? [] : [{product_id:"heineken", cost:30}],
   my_profit: a => a.p_biz !== "b1" ? NONE : ({good:GOOD, loss:LOSS, thin:THIN, none:NONE}[PROFIT]),
   my_businesses: () => BIZ,
+  set_fresh_start: a => {
+    if (P.get("nofresh") === "1") return {__error:"Could not find the function busynes.set_fresh_start(p_biz) in the schema cache"};
+    FRESH = a.p_clear ? null : (a.p_at || new Date().toISOString()); return FRESH;
+  },
   my_groups: a => a.p_biz !== "b1" ? G2 : G1,
   list_members: a => a.p_biz !== "b1" ? M2 : M1,
   sales_timeline: a => a.p_biz !== "b1" ? [] : P.get("many") === "1" ? Array.from({length: Math.min(a.p_limit, 700)}, (_, i) => Object.assign({}, T[1], {id: 100 + i})) : T,
@@ -106,6 +110,7 @@ const R = {
   delete_business: a => { BIZ = BIZ.filter(b => b.id !== a.p_biz); return null; },
   update_business: a => { const b = BIZ.find(x => x.id === a.p_biz); if (b) { if (a.p_name != null) b.name = a.p_name; if (a.p_kind != null) b.kind = a.p_kind; if (a.p_privacy != null) b.privacy = a.p_privacy; if (a.p_team_settle != null) b.team_settle = a.p_team_settle; if (a.p_currency != null) b.currency = a.p_currency; } return null; },
 };
+let FRESH = P.get("fresh") === "1" ? new Date(Date.now() - 3600e3).toISOString() : null;
 function builder(table){
   let biz = "b1", cols = "";
   const b = { select(c){ cols = c || ""; return b;}, order(){return b;}, limit(){return b;}, neq(){return b;}, is(){return b;}, eq(c, v){ if (c === "business_id") biz = v; return b;},
@@ -114,6 +119,7 @@ function builder(table){
                 if (table === "products" && P.get("oldprods") === "1" && /case_size/.test(cols)) return Promise.resolve({data:null, error:{message:"column products.case_size does not exist"}}).then(res, rej);
                 let d = D[table]; if (typeof d === "function") d = d(biz);
                 if (table === "stock_moves" && cols === "at") d = P.get("restock") === "1" ? [{at: new Date(Date.now() - 2 * 864e5).toISOString()}] : [];
+                if (table === "businesses" && cols === "fresh_from") d = [{fresh_from: FRESH}];
                 if (table === "notifications" && !biz) d = UNREAD;
                 return Promise.resolve({data: d || [], error: null}).then(res, rej);
               } };
@@ -987,6 +993,76 @@ console.log("\n20. Sales: pick dates and older sales");
   await Y.page.click("[data-moresales]"); await sleep(300);
   ok((await Y.last("sales_timeline"))[1].p_limit === 800 && !(await Y.exists("[data-moresales]")), "tapping it asks for more (800) and the button goes once everything is shown");
   await Y.page.close();
+}
+
+// ================================================================== 21. start counting from new stock
+console.log("\n21. Start counting from new stock");
+{
+  const lastMoney = async X => (await X.calls()).filter(c => c[0] === "my_money").pop()[1];
+  const N = await open("?me=sibabalo&solo=1"); await N.loaded(); const pg = N.page;
+  await N.tab("stock");
+  ok(await N.exists("#freshCard [data-fresh]") && /Start counting from new stock/.test(await N.text("#freshCard")) && !(await N.exists("[data-freshoff]")), "the Stock tab has a 'Start counting from new stock' button");
+  await N.tab("sales");
+  const before = await pg.$$eval(".sale", e => e.length);
+  ok(before > 0 && !(await N.exists("#freshSum")) && !(await N.exists('[data-speriod="fresh"]')), "before that, Sales shows everything as usual");
+  await N.tab("stock"); await pg.click("#freshCard [data-fresh]"); await pg.waitForSelector("#doFresh");
+  ok(/Nothing is deleted/.test(await N.text("#overlay")) && await pg.$eval("#freshDayBox", e => e.hidden), "it explains nothing is deleted, and counts from now unless you choose otherwise");
+  await pg.click("#doFresh"); await sleep(400);
+  let c = await N.last("set_fresh_start");
+  ok(c && !("p_at" in c[1]) && !("p_clear" in c[1]), "'Now' leaves the time to the server");
+  ok(/Counting since/.test(await N.text("#freshCard")), "the Stock tab then says when the count started");
+  await N.tab("sales");
+  ok(/R0/.test(await N.text("#freshSum")) && /0 sales since/.test(await N.text("#freshSum")) && await pg.$$eval(".sale", e => e.length) === 0, "Sales starts again from R0 with the old sales out of the way");
+  ok(/Nothing sold from the new stock yet/.test(await N.text()) && !(await N.exists("[data-sclear]")), "...and says nothing has been sold from the new stock yet");
+  await pg.type("#salesSearch", "Thando"); await sleep(150);
+  ok(await pg.$$eval(".sale", e => e.length) > 0, "searching still looks through the earlier sales");
+  await pg.click("[data-sclear]"); await sleep(120);
+  await pg.click('#freshSum [data-speriod="all"]'); await sleep(120);
+  ok(await pg.$$eval(".sale", e => e.length) === before, "'See all sales' brings every earlier sale back");
+  await pg.click('[data-speriod="fresh"]'); await sleep(120);
+  ok(await N.exists("#freshSum"), "...and 'New stock' goes back to the new count");
+  await N.tab("report");
+  let a = await lastMoney(N);
+  ok(a.p_from && Math.abs(new Date(a.p_from) - Date.now()) < 60000 && await pg.$eval('[data-period="restock"]', b => b.getAttribute("aria-pressed") === "true") && /when your new stock count started/.test(await N.text()), "My money counts from the same moment");
+  await pg.click('[data-period="all"]'); await sleep(250);
+  ok((await lastMoney(N)).p_from === null, "...and 'All time' still shows everything");
+  await N.tab("stock"); await pg.click("[data-freshoff]"); await sleep(400);
+  c = await N.last("set_fresh_start");
+  ok(c[1].p_clear === true && !(await N.exists("[data-freshoff]")), "'Show everything again' turns it off");
+  await N.tab("sales");
+  ok(!(await N.exists("#freshSum")) && await pg.$$eval(".sale", e => e.length) === before, "...and Sales is back to everything");
+
+  await N.tab("stock"); await pg.click("#freshCard [data-fresh]"); await pg.waitForSelector("#doFresh");
+  await pg.click('[data-freshwhen="day"]'); await pg.click("#doFresh"); await sleep(150);
+  ok(await N.exists("#doFresh"), "'Another day' asks for the day first");
+  await pg.$eval("#freshDay", e => { e.value = "2026-10-05"; }); await pg.click("#doFresh"); await sleep(400);
+  c = await N.last("set_fresh_start");
+  ok(c[1].p_at === await pg.evaluate(() => new Date("2026-10-05T00:00:00").toISOString()), "...and counts from the start of that day");
+  await pg.click('[data-edit="heineken"]'); await pg.waitForSelector("#saveAdd"); await pg.type("#addQty", "6"); await pg.click("#saveAdd"); await sleep(400);
+  ok(/Start new count/.test(await N.text(".toast")), "after saving new stock it offers 'Start new count'");
+  await pg.click(".toast button"); await sleep(150);
+  ok(await N.exists("#doFresh"), "...which opens the same question");
+  await pg.close();
+
+  const N1 = await open("?me=sibabalo&solo=1&fresh=1"); await N1.loaded(); await N1.tab("report");
+  ok(await N1.page.$eval('[data-period="restock"]', b => b.getAttribute("aria-pressed") === "true"), "with a count running, a solo business opens My money on it");
+  await N1.tab("sales");
+  ok(await N1.exists("#freshSum") && await N1.page.$$eval(".sale", e => e.length) > 0 && !/R0\.00/.test(await N1.text("#freshSum")), "...and Sales adds up what was sold since then");
+  await N1.page.close();
+
+  const N2 = await open("?me=sibabalo&fresh=1"); await N2.loaded(); await N2.tab("report");
+  ok(await N2.page.$eval('[data-period="settle"]', b => b.getAttribute("aria-pressed") === "true"), "a business with partners still opens My money on 'Since settle-up'");
+  await N2.page.close();
+
+  const N3 = await open("?role=staff&fresh=1"); await N3.loaded(); await N3.tab("stock");
+  ok(!(await N3.exists("#freshCard")), "staff don't get the button");
+  await N3.page.close();
+
+  const N4 = await open("?me=sibabalo&solo=1&nofresh=1"); await N4.loaded(); await N4.tab("stock");
+  await N4.page.click("#freshCard [data-fresh]"); await N4.page.waitForSelector("#doFresh"); await N4.page.click("#doFresh"); await sleep(250);
+  ok(/needs the latest database update/.test(await N4.text(".toast")), "on a database that isn't updated it says so");
+  await N4.page.close();
+  for (let i = errors.length - 1; i >= 0; i--) if (/nofresh=1 console: Error: This needs the latest database update/.test(errors[i])) errors.splice(i, 1);   // that message is the point of this check
 }
 
 // ================================================================== done
